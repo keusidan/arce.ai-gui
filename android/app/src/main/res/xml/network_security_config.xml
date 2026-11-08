@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The page the chat shows (EmbeddedPage) is served by the app itself on 127.0.0.1, over http: Android's WebView
+  refuses cleartext http unless the app allows it, and it allows it here for this device only. Every other
+  address stays on the default (https only); the app's own requests (dart:io) are not under this policy.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
