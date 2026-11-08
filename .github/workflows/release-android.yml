@@ -1,0 +1,390 @@
+# Builds the signed Android APK and adds it to the release v<version> (the app's own updater, and the
+# earlier native app, read this one). Other platforms have their own releases and workflows.
+#
+#   - Bump `version:` in pubspec.yaml (e.g. 0.5.0+1) and push (any branch)
+#       -> ARCE.AI-v0.5.0-android.apk is built and added to release v0.5.0 (created if missing).
+#          Skipped when that release already has an APK. A change to this file also runs it,
+#          so a fix to a failed build is retried by itself.
+#   - git tag v0.5.0 && git push origin v0.5.0       -> the same, for that tag
+#   - Actions tab -> "Release Android" -> Run workflow -> the same, for a version you type
+#     ... with "dry run" checked                     -> builds only; the APK stays a workflow artifact
+#     ... with "reuse_run" = the id of an earlier run -> no build: that run's APK is published
+#          (for a build that succeeded but whose publish failed; the run's artifact lives 7 days)
+#
+# Building and publishing are separate jobs, so a failed publish can be re-run alone ("Re-run failed
+# jobs") and does not throw away the 25-minute build or its caches.
+#
+# Secrets: ARCE_KEYSTORE_BASE64, ARCE_KEYSTORE_PASSWORD, ARCE_KEY_ALIAS (the keystore as base64, its password, the key alias)
+name: Release Android
+
+on:
+  push:
+    branches: ["**"]
+    paths: [pubspec.yaml, .github/workflows/release-android.yml, .github/actions/prepare/action.yml, .github/actions/publish/action.yml, .github/actions/proot/action.yml]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without 'v' (e.g. 0.5.0). Empty = the version in pubspec.yaml"
+        required: false
+      dry_run:
+        description: "Build only: nothing is published"
+        type: boolean
+        default: false
+      reuse_run:
+        description: "Run id of an earlier run whose APK is published instead of building again (the version must match)"
+        required: false
+
+# The build jobs only read; the publish job asks for what it needs.
+permissions:
+  contents: read
+
+# Releases of one platform queue behind each other; a dry run builds on its own.
+concurrency:
+  group: release-android-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      tag: ${{ steps.p.outputs.tag }}
+      build_number: ${{ steps.p.outputs.build_number }}
+      release: ${{ steps.p.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: p
+        uses: ./.github/actions/prepare
+        with:
+          platform: android
+          suffix: -android.apk
+          version: ${{ inputs.version }}
+          token: ${{ github.token }}
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true' && inputs.reuse_run == ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # The build does not wait for the tests: both start together and publishing needs both (see `publish`).
+  android:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true' && inputs.reuse_run == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # llama.cpp for two ABIs, the NDK, Gradle and Flutter together fill the runner's ~14 GB of free
+      # disk ("No space left on device" in the first run), so remove what this job never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /usr/share/swift \
+            /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android/sdk/ndk/2[0-8].* /usr/local/lib/android/sdk/ndk/1* 2>/dev/null || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive # llama.cpp and proot
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # The NDK (~1 GB) is kept between runs instead of being downloaded every time.
+      - name: Restore NDK and CMake
+        id: ndk-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/29.0.13113456
+            /usr/local/lib/android/sdk/cmake/3.22.1
+          key: android-ndk-29.0.13113456-cmake-3.22.1
+
+      # The runner image ships a different NDK and has not accepted this one's license,
+      # so Gradle cannot install it on its own.
+      - name: Install NDK and CMake
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null
+          "$sdkmanager" "ndk;29.0.13113456" "cmake;3.22.1" > /dev/null
+
+      # proot (the Termux fork, pinned as a submodule) is built here with the same NDK and put in
+      # jniLibs, so it ships as libproot.so / libproot_loader.so and is extracted to nativeLibraryDir at
+      # install time (the app runs it from there; Android runs a program only from a file on disk). The
+      # result is cached by the submodule's commit, so the build takes minutes only when proot changes.
+      - name: Build proot
+        id: proot
+        uses: ./.github/actions/proot
+
+      - name: Put proot in the app
+        run: |
+          dest=android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$dest"
+          cp "${{ steps.proot.outputs.dir }}/libproot.so" "${{ steps.proot.outputs.dir }}/libproot_loader.so" "$dest/"
+          ls -l "$dest"
+
+      # ccache keeps the compiled objects of llama.cpp and the JNI bridge between runs.
+      - name: Set up ccache
+        id: ccache
+        run: |
+          command -v ccache > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ccache; }
+          echo "llama=$(git rev-parse HEAD:third_party/llama.cpp)" >> "$GITHUB_OUTPUT"
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_MAXSIZE=1G"
+          } >> "$GITHUB_ENV"
+          sed -i 's/^arce.ccache=.*/arce.ccache=true/' android/gradle.properties
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ steps.ccache.outputs.llama }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ steps.ccache.outputs.llama }}-
+            ccache-
+
+      - name: Restore signing keystore
+        if: env.DRY_RUN != 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ARCE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ARCE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ARCE_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::Signing secrets are missing. A debug-signed APK could not update the installed app. Add the three ARCE_KEYSTORE_* secrets to the repository."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          {
+            echo "ARCE_KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+            echo "ARCE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ARCE_KEY_ALIAS=$KEY_ALIAS"
+          } >> "$GITHUB_ENV"
+
+      - run: flutter pub get
+
+      - name: Build APK
+        run: >
+          flutter build apk --release
+          --target-platform android-arm64,android-x64
+          --build-name ${{ needs.prepare.outputs.version }}
+          --build-number ${{ needs.prepare.outputs.build_number }}
+
+      # A proot that is not in the APK, or is in it but would not be extracted, is found here, not on a phone.
+      - name: Check proot in the APK
+        run: |
+          aapt2="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/aapt2"
+          python3 - "build/app/outputs/flutter-apk/app-release.apk" "${{ steps.proot.outputs.dir }}" "$aapt2" <<'PY'
+          import hashlib, re, subprocess, sys, zipfile
+          apk, built, aapt2 = sys.argv[1:4]
+          problems = []
+          with zipfile.ZipFile(apk) as z:
+              for name in ("libproot.so", "libproot_loader.so"):
+                  entry = f"lib/arm64-v8a/{name}"
+                  try:
+                      data = z.read(entry)
+                  except KeyError:
+                      problems.append(f"{entry} is not in the APK")
+                      continue
+                  if hashlib.sha256(data).hexdigest() != hashlib.sha256(open(f"{built}/{name}", "rb").read()).hexdigest():
+                      problems.append(f"{entry} differs from the file that was built")
+              # useLegacyPackaging stores the libraries compressed (deflate); uncompressed ones are mapped from the APK and cannot be run as programs
+              stored = [i.filename for i in z.infolist() if i.filename.startswith("lib/") and i.filename.endswith(".so") and i.compress_type == 0]
+              if stored:
+                  problems.append(f"{len(stored)} libraries are stored uncompressed (not legacy packaging): {stored[:3]}")
+          manifest = subprocess.run([aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", apk], capture_output=True, text=True).stdout
+          if not re.search(r"extractNativeLibs[^\n]*=(true|\(type 0x12\)0xffffffff)", manifest):
+              problems.append("the manifest does not say extractNativeLibs=true: " + ", ".join(l.strip() for l in manifest.splitlines() if "extractNativeLibs" in l))
+          if problems:
+              print("::error::" + "%0A".join(problems))
+              sys.exit(1)
+          print("proot is in the APK, byte for byte, and the libraries are extracted at install")
+          PY
+
+      - name: Verify signature
+        if: env.DRY_RUN != 'true'
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          "$apksigner" verify --print-certs build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Collect
+        run: |
+          name="ARCE.AI-v${{ needs.prepare.outputs.version }}-android.apk"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/
+          retention-days: 7
+
+      # Saved even when the build failed: the objects compiled so far make the retry faster.
+      - name: Save ccache
+        if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ steps.ccache.outputs.llama }}-${{ github.sha }}
+
+  publish:
+    needs: [prepare, test, android]
+    # Runs after the tests and a build, or alone when an earlier run's APK is reused (then both are skipped).
+    if: >-
+      ${{ !cancelled()
+      && needs.prepare.outputs.release == 'true'
+      && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+      && (needs.test.result == 'success' || (needs.test.result == 'skipped' && inputs.reuse_run != ''))
+      && (needs.android.result == 'success' || (needs.android.result == 'skipped' && inputs.reuse_run != '')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and its tag
+      actions: read # download the APK of this or an earlier run
+    steps:
+      - uses: actions/checkout@v7 # for the local actions below
+
+      - name: Download the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: dist
+          run-id: ${{ inputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check the files and find the commit they were built from
+        id: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REUSE_RUN: ${{ inputs.reuse_run }}
+        run: |
+          # an APK of another version must not end up in this version's release
+          if [ ! -f "dist/ARCE.AI-v$VERSION-android.apk" ] || [ ! -f "dist/ARCE.AI-v$VERSION-android.apk.sha256" ]; then
+            echo "::error::dist/ has no ARCE.AI-v$VERSION-android.apk(.sha256); is reuse_run the run of version $VERSION?"
+            ls -l dist
+            exit 1
+          fi
+          (cd dist && sha256sum --check "ARCE.AI-v$VERSION-android.apk.sha256")
+          if [ -n "$REUSE_RUN" ]; then
+            [[ "$REUSE_RUN" =~ ^[0-9]+$ ]] || { echo "::error::reuse_run must be a run id"; exit 1; }
+            sha="$(gh run view "$REUSE_RUN" --json headSha --jq .headSha)"
+          else
+            sha="$GITHUB_SHA"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Every platform has its own release. Only the Android one is "latest": the earlier native app
+      # reads /releases/latest and expects an APK in it.
+      - uses: ./.github/actions/publish
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ARCE.AI ${{ needs.prepare.outputs.tag }}
+          latest: "true"
+          sha: ${{ steps.src.outputs.sha }}
+
+  # The app can download only what changed since the build it has installed: a bsdiff patch from each
+  # of the last few releases to this one, next to the APK. It is made after the release is out, so the
+  # APK does not wait for it; the patches are added to the release a few minutes later, and until then
+  # the app downloads the whole file. The app checks the result against the APK's SHA-256, so a patch
+  # that does not fit only costs it the full download. A failure here must not turn the run red.
+  patches:
+    needs: [prepare, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write # add the patches to the release
+      actions: read # download the APK of this or an earlier run
+    steps:
+      - uses: actions/checkout@v7 # for the local action below
+
+      - name: Download the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: dist
+          run-id: ${{ inputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Make patches from earlier releases
+        id: make
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PATCH_FROM: "3" # how many earlier releases get a patch
+        run: |
+          python3 -m venv /tmp/bsdiff-venv
+          /tmp/bsdiff-venv/bin/pip install --quiet bsdiff4
+          new="dist/ARCE.AI-v$VERSION-android.apk"
+          new_size="$(stat -c %s "$new")"
+          mkdir -p old patches
+          # Android tags are plain vX.Y.Z; take the newest ones that are older than this version
+          versions="$( { gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//'; echo "$VERSION"; } \
+            | sort -uV | awk -v v="$VERSION" '$0 == v { exit } { print }' | tail -n "$PATCH_FROM")"
+          echo "patches from: $(echo $versions)"
+
+          # one patch; a failure of it is its own (the others still go on)
+          make_patch() {
+            old_version="$1"
+            gh release download "v$old_version" --pattern "ARCE.AI-v$old_version-android.apk" --dir old --clobber \
+              || { echo "no APK in v$old_version"; return 0; }
+            # made outside patches/ and moved in only when whole, so a failure leaves no half file to upload
+            made="old/from-$old_version.patch"
+            /tmp/bsdiff-venv/bin/python -c "import bsdiff4,sys; bsdiff4.file_diff(sys.argv[1], sys.argv[2], sys.argv[3])" \
+              "old/ARCE.AI-v$old_version-android.apk" "$new" "$made" || { echo "diff from $old_version failed"; return 0; }
+            # a patch that is not much smaller than the file is not worth offering
+            if [ "$(( $(stat -c %s "$made") * 2 ))" -gt "$new_size" ]; then
+              echo "patch from $old_version is too large; skipped"
+            else
+              mv "$made" "patches/ARCE.AI-v$VERSION-android.apk.from-$old_version.patch"
+              echo "patch from $old_version: $(stat -c %s "patches/ARCE.AI-v$VERSION-android.apk.from-$old_version.patch") bytes (APK $new_size)"
+            fi
+          }
+          # the diffs are single-threaded and independent: all at once
+          for old_version in $versions; do make_patch "$old_version" & done
+          wait
+          ls -l patches
+          if compgen -G "patches/*" > /dev/null; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Add the patches to the release
+        if: steps.make.outputs.any == 'true'
+        uses: ./.github/actions/publish
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ARCE.AI ${{ needs.prepare.outputs.tag }}
+          latest: "true"
+          dir: patches

@@ -1,0 +1,95 @@
+# Builds the Linux app and adds it to its own release linux-v<version> (the other platforms have theirs).
+#
+#   - Bump `version:` in pubspec.yaml and push (any branch) -> built if its release has no Linux file yet
+#   - git tag linux-v0.5.0 && git push origin linux-v0.5.0 -> the same, for that tag
+#   - Actions tab -> "Release Linux" -> Run workflow -> the same, for a version you type
+#     ... with "dry run" checked -> builds only; the file stays a workflow artifact
+name: Release Linux
+
+on:
+  push:
+    branches: ["**"]
+    paths: [pubspec.yaml]
+    tags: ["linux-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without 'v' (e.g. 0.5.0). Empty = the version in pubspec.yaml"
+        required: false
+      dry_run:
+        description: "Build only: nothing is published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create the release and its tag
+
+# Releases of one platform queue behind each other; a dry run builds on its own.
+concurrency:
+  group: release-linux-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      tag: ${{ steps.p.outputs.tag }}
+      build_number: ${{ steps.p.outputs.build_number }}
+      release: ${{ steps.p.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: p
+        uses: ./.github/actions/prepare
+        with:
+          platform: linux
+          suffix: -linux-x64.tar.gz
+          version: ${{ inputs.version }}
+          token: ${{ github.token }}
+
+  linux:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev libwebkit2gtk-4.1-dev
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: >
+          flutter build linux --release
+          --build-name ${{ needs.prepare.outputs.version }}
+          --build-number ${{ needs.prepare.outputs.build_number }}
+      - name: Collect
+        run: |
+          name="ARCE.AI-v${{ needs.prepare.outputs.version }}-linux-x64.tar.gz"
+          mkdir -p dist
+          # the contents of the bundle folder, with the executable at the top (the updater relies on it)
+          tar -C build/linux/x64/release/bundle -czf "dist/$name" .
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/
+          retention-days: 7
+      - name: Publish
+        if: env.DRY_RUN != 'true'
+        uses: ./.github/actions/publish
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ARCE.AI v${{ needs.prepare.outputs.version }} (Linux)
+          latest: "false" # only the Android release is "latest": the earlier native app reads /releases/latest

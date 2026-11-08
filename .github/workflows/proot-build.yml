@@ -1,0 +1,34 @@
+# Builds proot (the Termux fork, pinned as the submodule third_party/proot) for Android arm64 with the
+# NDK the app uses, and keeps the result as a workflow artifact. This is stage 1 of the in-app Linux
+# environment: it shows that proot builds, what it weighs and what
+# it links against. It does not release anything and is not part of any release workflow. The build
+# itself is the local action .github/actions/proot, which the packaging measurement also uses.
+name: Build proot
+
+on:
+  push:
+    branches: ["**"]
+    paths: [.github/workflows/proot-build.yml, .github/actions/proot/action.yml, third_party/proot]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch only the proot submodule
+        run: git submodule update --init --depth 1 third_party/proot
+
+      - id: proot
+        uses: ./.github/actions/proot
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: proot-arm64-v8a
+          path: ${{ steps.proot.outputs.dir }}
+          retention-days: 14

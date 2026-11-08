@@ -1,0 +1,88 @@
+# The repository bot. Mention it in an issue or a pull request:  @arce-bot <what you want>
+#
+#   - It reads the thread, asks a model, and replies. When a change is asked for, it puts the change on a
+#     branch of its own (bot/…) and opens a DRAFT pull request. It never merges and never touches main.
+#   - Only OWNER, MEMBER and COLLABORATOR comments run it; the bot's own comments never do.
+#   - What it may write is decided by tool/bot/bot_core.dart, not by the model: lib/, test/, docs/ and
+#     README.md only; never .github/, AGENTS.md, pubspec.yaml or key files.
+#   - Writes use the token of the repository's GitHub App (so that CI runs on the pull request); the
+#     workflow's own GITHUB_TOKEN is read only.
+#   - Actions tab -> "Bot" -> Run workflow -> an issue number, with "dry run" checked: it reads and thinks,
+#     and writes nothing (the log says what it would do).
+#
+# Set up once: a GitHub App with Contents, Pull requests and Issues = read & write, installed on
+# this repository; secrets BOT_APP_PRIVATE_KEY and BOT_API_KEY; variables BOT_APP_ID, BOT_API_URL, BOT_MODEL.
+name: Bot
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue or pull request number"
+        required: true
+      instruction:
+        description: "What to do (what you would write after @arce-bot)"
+        required: false
+      dry_run:
+        description: "Write nothing: the log says what it would do"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One answer at a time for a thread; a second call waits for the first.
+concurrency:
+  group: bot-${{ github.event.issue.number || inputs.issue }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+
+jobs:
+  answer:
+    # a first filter; the bot checks again (tool/bot/bot_core.dart, BotPolicy) before it does anything
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.comment.body, '@arce-bot') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+       github.event.comment.user.type != 'Bot')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # the default branch, as it is: the bot's code is the repository's own, never what a comment says
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # a short-lived token of the App, for this repository only
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      # Nothing from the comment is put into this command line: the bot reads the event from the file
+      # GitHub gives it, so a comment cannot write a shell command.
+      - run: dart run tool/bot/bot.dart
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          BOT_API_URL: ${{ vars.BOT_API_URL }}
+          BOT_API_KEY: ${{ secrets.BOT_API_KEY }}
+          BOT_MODEL: ${{ vars.BOT_MODEL }}
+          BOT_EXTRA_BODY: ${{ vars.BOT_EXTRA_BODY }}
+          BOT_ALLOWED_PATHS: ${{ vars.BOT_ALLOWED_PATHS }}
+          BOT_DRY_RUN: ${{ inputs.dry_run }}
+          BOT_ISSUE: ${{ inputs.issue }}
+          BOT_INSTRUCTION: ${{ inputs.instruction }}

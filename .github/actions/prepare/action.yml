@@ -1,0 +1,79 @@
+# Works out the version to build and whether this platform still needs a build.
+# Used by the release-<platform>.yml workflows.
+name: Prepare release
+description: Resolve the version, tag and build number, and skip a platform that is already released.
+
+inputs:
+  platform:
+    description: "android, ios, linux, windows or macos. Android keeps the plain tag vX.Y.Z (the earlier native app reads it); the others use <platform>-vX.Y.Z, so every platform has its own release"
+    required: true
+  suffix:
+    description: "File-name ending of this platform's release asset, e.g. -android.apk"
+    required: true
+  version:
+    description: "Version typed into a manual run (empty = pubspec.yaml)"
+    required: false
+    default: ""
+  token:
+    description: GitHub token used to look at existing releases
+    required: true
+
+outputs:
+  version:
+    description: Version without "v"
+    value: ${{ steps.v.outputs.version }}
+  tag:
+    description: Tag of this platform's release
+    value: ${{ steps.v.outputs.tag }}
+  build_number:
+    description: Increasing number derived from the version
+    value: ${{ steps.v.outputs.build_number }}
+  release:
+    description: "true when the platform should be built"
+    value: ${{ steps.v.outputs.release }}
+
+runs:
+  using: composite
+  steps:
+    - id: v
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        INPUT_VERSION: ${{ inputs.version }}
+        SUFFIX: ${{ inputs.suffix }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          # v0.5.0 and ios-v0.5.0 both end in the version
+          version="${GITHUB_REF_NAME##*v}"
+        elif [ -n "$INPUT_VERSION" ]; then
+          version="${INPUT_VERSION#v}"
+        else
+          version="$(sed -n 's/^version:[[:space:]]*\([0-9.]*\).*/\1/p' pubspec.yaml | head -1)"
+        fi
+        # Windows embeds the version as numbers, so a suffix such as -beta is not allowed
+        if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "::error::'$version' is not a version like 1.2.3"
+          exit 1
+        fi
+        IFS=. read -r major minor patch <<< "$version"
+        # Android refuses an update whose versionCode is not higher. Deriving it from the version (not from
+        # the workflow's run number) keeps it growing however the builds are split across workflows.
+        build_number=$(( major * 1000000 + minor * 1000 + patch ))
+
+        if [ "$PLATFORM" = android ]; then tag="v$version"; else tag="$PLATFORM-v$version"; fi
+
+        release=true
+        # A push only builds what its release lacks, so a retry after a failure builds just the missing file
+        if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ] \
+           && gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null \
+              | grep -q -- "${SUFFIX}\$"; then
+          echo "$tag already has a file ending in $SUFFIX; nothing to do"
+          release=false
+        fi
+        {
+          echo "version=$version"
+          echo "tag=$tag"
+          echo "build_number=$build_number"
+          echo "release=$release"
+        } >> "$GITHUB_OUTPUT"

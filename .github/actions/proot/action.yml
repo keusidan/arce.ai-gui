@@ -1,0 +1,185 @@
+# Builds proot (the Termux fork, the submodule third_party/proot) for Android arm64 with the NDK the
+# app uses and leaves libproot.so and libproot_loader.so in <runner temp>/proot-out. The result is
+# cached by the submodule's commit, so it is built once per proot version.
+#
+# libtalloc (proot's one dependency) is built from the Ubuntu source package: apt checks its signature.
+# The checkout must contain third_party/proot (git submodule update --init third_party/proot).
+name: Build proot
+description: Build proot and its loader for Android arm64 from the pinned submodule.
+
+inputs:
+  ndk-version:
+    description: NDK to build with (installed if the runner does not have it)
+    required: false
+    default: "29.0.13113456"
+  api:
+    description: Android API level to build for (the app's minSdk)
+    required: false
+    default: "31"
+
+outputs:
+  dir:
+    description: Folder with libproot.so and libproot_loader.so
+    value: ${{ steps.dir.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - id: dir
+      shell: bash
+      run: |
+        echo "dir=$RUNNER_TEMP/proot-out" >> "$GITHUB_OUTPUT"
+        echo "sha=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:third_party/proot)" >> "$GITHUB_OUTPUT"
+
+    - id: cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/proot-out
+        key: proot-${{ steps.dir.outputs.sha }}-ndk${{ inputs.ndk-version }}-api${{ inputs.api }}-${{ hashFiles('.github/actions/proot/action.yml') }}
+
+    - name: Install the NDK
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        NDK_VERSION: ${{ inputs.ndk-version }}
+      run: |
+        if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          # `yes` gets SIGPIPE when sdkmanager stops reading, which pipefail (shell: bash) counts as a failure
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+        fi
+        bin="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        echo "TOOLBIN=$bin" >> "$GITHUB_ENV"
+        "$bin/clang" --version | head -1
+
+    - name: Get the libtalloc source from Ubuntu
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq dpkg-dev python3
+        mkdir "$RUNNER_TEMP/talloc-src"
+        cd "$RUNNER_TEMP/talloc-src"
+        apt-get source --download-only talloc
+        dpkg-source -x talloc_*.dsc talloc
+        ls talloc
+
+    - name: Build libtalloc (static) for Android arm64
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        API: ${{ inputs.api }}
+      run: |
+        export CC="$TOOLBIN/aarch64-linux-android${API}-clang" AR="$TOOLBIN/llvm-ar" RANLIB="$TOOLBIN/llvm-ranlib"
+        cd "$RUNNER_TEMP/talloc-src/talloc"
+        # configure asks for the result of checks that cannot run when cross-compiling; these are the
+        # answers for Android's libc (bionic), found by running configure until it stopped asking
+        cat > cross-answers.txt <<'EOF'
+        Checking uname sysname type: "Linux"
+        Checking uname machine type: "aarch64"
+        Checking uname release type: "dontcare"
+        Checking uname version type: "dontcare"
+        Checking simple C program: OK
+        rpath library support: OK
+        -Wl,--version-script support: FAIL
+        Checking getconf LFS_CFLAGS: OK
+        Checking getconf large file support flags work: OK
+        Checking for large file support without additional flags: OK
+        Checking for -D_FILE_OFFSET_BITS=64: OK
+        Checking for -D_LARGE_FILES: OK
+        Checking for HAVE_SECURE_MKSTEMP: OK
+        Checking for C99 vsnprintf: OK
+        Checking for HAVE_C99_VSNPRINTF: OK
+        Checking for working strptime: OK
+        Checking for HAVE_IFACE_GETIFADDRS: OK
+        Checking for HAVE_IFACE_IFCONF: FAIL
+        Checking for HAVE_IFACE_IFREQ: FAIL
+        Checking for HAVE_SHARED_MMAP: OK
+        Checking for HAVE_MMAP: OK
+        Checking for HAVE_FCNTL_LOCK: OK
+        Checking for HAVE_FTRUNCATE_EXTEND: OK
+        Checking for HAVE_BROKEN_READDIR: FAIL
+        Checking for HAVE_WORKING_GETCWD: OK
+        Checking for HAVE_IFACE_AIX: FAIL
+        Checking correct behavior of strtoll: OK
+        Checking for HAVE_MREMAP: OK
+        Checking for HAVE_INCOHERENT_MMAP: FAIL
+        EOF
+        # a failure is also written as one annotation, so it can be read without the full log
+        fail() {
+          { echo "$1"; tail -n 90 "$2"; } | python3 -c \
+            'import sys; print("::error::" + sys.stdin.read().replace("%","%25").replace("\r","").replace("\n","%0A"))'
+          exit 1
+        }
+        ./configure --prefix="$RUNNER_TEMP/talloc-out" --disable-rpath --disable-python \
+          --cross-compile --cross-answers=cross-answers.txt > configure.out 2>&1 || {
+            { tail -n 12 configure.out; echo ---; python3 - <<'PY'
+        import re
+        lines = open("bin/config.log", errors="replace").read().split("\n")
+        for i, l in enumerate(lines):
+            if "--cross-answers" in l:
+                q = re.findall(r"'([^']*)'\]", l)
+                nxt = " ".join(lines[i + 1:i + 4])
+                if "failed" in nxt or "Traceback" in nxt:
+                    print("UNANSWERED?", q[-1] if q else l[-80:])
+        PY
+            } > configure.tail
+            fail "talloc configure failed" configure.tail
+          }
+        make -j"$(nproc)" > make.out 2>&1 || fail "talloc make failed" make.out
+        mkdir -p "$RUNNER_TEMP/talloc-out/lib" "$RUNNER_TEMP/talloc-out/include"
+        objs=$(find bin/default -name '*.o' ! -name '*test*' ! -name '*pytalloc*' | sort)
+        "$AR" rcs "$RUNNER_TEMP/talloc-out/lib/libtalloc.a" $objs
+        cp talloc.h "$RUNNER_TEMP/talloc-out/include/"
+        "$RANLIB" "$RUNNER_TEMP/talloc-out/lib/libtalloc.a"
+        ls -l "$RUNNER_TEMP/talloc-out/lib"
+
+    - name: Build proot
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        API: ${{ inputs.api }}
+      run: |
+        export CC="$TOOLBIN/aarch64-linux-android${API}-clang" STRIP="$TOOLBIN/llvm-strip" \
+               OBJCOPY="$TOOLBIN/llvm-objcopy" OBJDUMP="$TOOLBIN/llvm-objdump"
+        # The makefile only works inside its own source folder (its VPATH doubles the path otherwise),
+        # so build in a copy and leave the submodule clean.
+        mkdir -p "$RUNNER_TEMP/proot-build"
+        cp -r "$GITHUB_WORKSPACE/third_party/proot/src" "$RUNNER_TEMP/proot-build/src"
+        cd "$RUNNER_TEMP/proot-build/src"
+        # The loader is a separate file (found at run time through PROOT_LOADER), not unpacked from
+        # proot at every start; the path given here is only the fallback. The flags go in through the
+        # environment: the makefile appends to them with +=, which a make argument would switch off.
+        # ashmem_memfd.c uses strcmp / memset without <string.h>, which the NDK's clang (C99 and later)
+        # refuses as an error; it is turned back into a warning (the calls resolve to bionic's functions
+        # at link time) instead of changing the source. A global -include string.h breaks the
+        # freestanding loader, which defines its own basename().
+        export CPPFLAGS="-I$RUNNER_TEMP/talloc-out/include -Wno-error=implicit-function-declaration" \
+               LDFLAGS="-L$RUNNER_TEMP/talloc-out/lib -Wl,-z,max-page-size=16384" \
+               PROOT_UNBUNDLE_LOADER=/nonexistent
+        make V=1 proot loader/loader > make.out 2>&1 || {
+          { echo "proot make failed"; grep -n -i -B2 -A4 'error' make.out | tail -n 60; echo ---; tail -n 20 make.out; } \
+            | python3 -c 'import sys; print("::error::" + sys.stdin.read().replace("%","%25").replace("\r","").replace("\n","%0A"))'
+          exit 1
+        }
+        out="$RUNNER_TEMP/proot-out"
+        mkdir -p "$out"
+        cp proot "$out/libproot.so"
+        cp loader/loader "$out/libproot_loader.so"
+        "$TOOLBIN/llvm-strip" "$out/libproot.so" "$out/libproot_loader.so"
+        {
+          echo "### proot (Termux fork $(git -C "$GITHUB_WORKSPACE/third_party/proot" describe --tags --always))"
+          ls -l "$out" | sed 's/^/    /'
+          echo
+          echo "readelf (dynamic section, program headers)"
+          "$TOOLBIN/llvm-readelf" -d -l "$out/libproot.so" | sed 's/^/    /'
+        } > "$out/build-info.txt"
+        cat "$out/build-info.txt" >> "$GITHUB_STEP_SUMMARY"
+        # also as one annotation, readable without opening the run
+        python3 -c 'import sys; print("::notice::" + sys.stdin.read().replace("%","%25").replace("\r","").replace("\n","%0A"))' < "$out/build-info.txt"
+
+    - name: What is there
+      shell: bash
+      run: ls -l "$RUNNER_TEMP/proot-out"

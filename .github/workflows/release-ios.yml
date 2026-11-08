@@ -1,0 +1,94 @@
+# Builds the iOS app and adds it to its own release ios-v<version> (the other platforms have theirs).
+#
+#   - Bump `version:` in pubspec.yaml and push (any branch) -> built if its release has no iOS file yet
+#   - git tag ios-v0.5.0 && git push origin ios-v0.5.0 -> the same, for that tag
+#   - Actions tab -> "Release iOS" -> Run workflow -> the same, for a version you type
+#     ... with "dry run" checked -> builds only; the file stays a workflow artifact
+#
+# It is unsigned: sign it with your own Apple ID (AltStore, Sideloadly) before it installs on a device.
+# macOS runners count 10x against the free minutes of a private repository.
+name: Release iOS
+
+on:
+  push:
+    branches: ["**"]
+    paths: [pubspec.yaml]
+    tags: ["ios-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without 'v' (e.g. 0.5.0). Empty = the version in pubspec.yaml"
+        required: false
+      dry_run:
+        description: "Build only: nothing is published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create the release and its tag
+
+# Releases of one platform queue behind each other; a dry run builds on its own.
+concurrency:
+  group: release-ios-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      tag: ${{ steps.p.outputs.tag }}
+      build_number: ${{ steps.p.outputs.build_number }}
+      release: ${{ steps.p.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: p
+        uses: ./.github/actions/prepare
+        with:
+          platform: ios
+          suffix: -ios-unsigned.ipa
+          version: ${{ inputs.version }}
+          token: ${{ github.token }}
+
+  ios:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: >
+          flutter build ios --release --no-codesign
+          --build-name ${{ needs.prepare.outputs.version }}
+          --build-number ${{ needs.prepare.outputs.build_number }}
+      - name: Collect
+        run: |
+          name="ARCE.AI-v${{ needs.prepare.outputs.version }}-ios-unsigned.ipa"
+          mkdir -p dist work/Payload
+          cp -R build/ios/iphoneos/Runner.app work/Payload/
+          (cd work && zip -qry "../dist/$name" Payload)
+          (cd dist && shasum -a 256 "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: dist/
+          retention-days: 7
+      - name: Publish
+        if: env.DRY_RUN != 'true'
+        uses: ./.github/actions/publish
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ARCE.AI v${{ needs.prepare.outputs.version }} (iOS)
+          latest: "false" # only the Android release is "latest": the earlier native app reads /releases/latest

@@ -1,0 +1,94 @@
+# Measurement only, started by hand: what would it cost to package proot as a native library?
+#
+# An executable can be run only from a file on disk, so proot must be extracted from the APK at install
+# time (useLegacyPackaging = true, android:extractNativeLibs). That makes every native library of the
+# app be stored compressed in the APK and be copied to the device's disk. This workflow takes two real
+# releases and reports (1) how much disk the extracted libraries take, (2) the APK size, and (3) how
+# large the delta-update patch between the two becomes when the libraries are compressed (a patch
+# between compressed streams cannot follow small changes). It builds nothing and releases nothing.
+name: Measure proot packaging
+
+on:
+  workflow_dispatch:
+    inputs:
+      old:
+        description: "Older release version (e.g. 0.8.18)"
+        required: true
+      new:
+        description: "Newer release version (e.g. 0.8.19)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Download the two APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          OLD: ${{ inputs.old }}
+          NEW: ${{ inputs.new }}
+        run: |
+          mkdir apks
+          for v in "$OLD" "$NEW"; do
+            gh release download "v$v" --pattern "ARCE.AI-v$v-android.apk" --dir apks
+          done
+          ls -l apks
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet bsdiff4
+
+      - name: Measure
+        env:
+          OLD: ${{ inputs.old }}
+          NEW: ${{ inputs.new }}
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" - <<'PY' | tee report.txt
+          import os, zipfile, bsdiff4
+
+          old, new = os.environ["OLD"], os.environ["NEW"]
+          path = lambda v: f"apks/ARCE.AI-v{v}-android.apk"
+          mb = lambda n: f"{n / 1048576:.1f} MB"
+
+          def repack(src, dst):
+              """The same APK with every lib/*.so compressed (what useLegacyPackaging does)."""
+              with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+                  for info in zin.infolist():
+                      data = zin.read(info.filename)
+                      kind = zipfile.ZIP_DEFLATED if info.filename.startswith("lib/") and info.filename.endswith(".so") else info.compress_type
+                      zout.writestr(zipfile.ZipInfo(info.filename, info.date_time), data, compress_type=kind, compresslevel=6)
+
+          for v in (old, new):
+              repack(path(v), f"apks/legacy-{v}.apk")
+
+          print(f"== {new}: libraries per ABI (stored size in the APK / what an extraction writes to the disk)")
+          with zipfile.ZipFile(path(new)) as z:
+              per = {}
+              for i in z.infolist():
+                  if i.filename.startswith("lib/") and i.filename.endswith(".so"):
+                      abi = i.filename.split("/")[1]
+                      a, b = per.get(abi, (0, 0))
+                      per[abi] = (a + i.compress_size, b + i.file_size)
+              for abi, (stored, disk) in sorted(per.items()):
+                  print(f"  {abi}: {mb(stored)} in the APK, {mb(disk)} on the disk")
+              big = sorted((i for i in z.infolist() if i.filename.startswith("lib/arm64-v8a/")), key=lambda i: -i.file_size)[:6]
+              for i in big:
+                  print(f"    {i.filename}: {mb(i.file_size)}")
+
+          print()
+          print("== APK size")
+          for label, p in (("now (libraries stored)", path(new)), ("with extractNativeLibs (compressed)", f"apks/legacy-{new}.apk")):
+              print(f"  {label}: {mb(os.path.getsize(p))}")
+
+          print()
+          print(f"== delta patch {old} -> {new} (bsdiff, as the release workflow makes it)")
+          for label, a, b in (("now (libraries stored)", path(old), path(new)),
+                              ("with extractNativeLibs (compressed)", f"apks/legacy-{old}.apk", f"apks/legacy-{new}.apk")):
+              bsdiff4.file_diff(a, b, "p.patch")
+              print(f"  {label}: {mb(os.path.getsize('p.patch'))} ({os.path.getsize('p.patch')} bytes)")
+          PY
+          python3 -c 'import sys; print("::notice::" + sys.stdin.read().replace("%","%25").replace("\r","").replace("\n","%0A"))' < report.txt
+          cat report.txt >> "$GITHUB_STEP_SUMMARY"

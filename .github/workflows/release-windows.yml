@@ -1,0 +1,119 @@
+# Builds the Windows app and adds it to its own release windows-v<version> (the other platforms have theirs).
+#
+#   - Bump `version:` in pubspec.yaml and push (any branch) -> built if its release has no Windows file yet
+#   - git tag windows-v0.5.0 && git push origin windows-v0.5.0 -> the same, for that tag
+#   - Actions tab -> "Release Windows" -> Run workflow -> the same, for a version you type
+#     ... with "dry run" checked -> builds only; the file stays a workflow artifact
+name: Release Windows
+
+on:
+  push:
+    branches: ["**"]
+    # the workflow itself, so a fix can be tried without changing the version
+    paths: [pubspec.yaml, .github/workflows/release-windows.yml, .github/actions/publish/action.yml]
+    tags: ["windows-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without 'v' (e.g. 0.5.0). Empty = the version in pubspec.yaml"
+        required: false
+      dry_run:
+        description: "Build only: nothing is published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # the release and its tag (the build jobs only need read)
+
+# Releases of one platform queue behind each other; a dry run builds on its own.
+concurrency:
+  group: release-windows-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      tag: ${{ steps.p.outputs.tag }}
+      build_number: ${{ steps.p.outputs.build_number }}
+      release: ${{ steps.p.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: p
+        uses: ./.github/actions/prepare
+        with:
+          platform: windows
+          suffix: -windows-x64.zip
+          version: ${{ inputs.version }}
+          token: ${{ github.token }}
+
+  windows:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      # The suite passes on the Linux runner and fails here on 3 tests (the annotation of the
+      # failing step reads "209 tests passed, 3 failed"), so the cause is in those tests. The job
+      # log cannot be downloaded by the account that maintains this repository, and only
+      # annotations are readable, so the names are re-emitted as error annotations below.
+      - name: Test
+        shell: pwsh
+        run: |
+          # `expanded` puts each failing test on a line that ends with [E]; the default reporter
+          # prints only the counts, which is why the first attempt reported "failing tests: 0".
+          flutter test --reporter expanded 2>&1 | Tee-Object -FilePath test.log
+          $code = $LASTEXITCODE
+          if ($code -eq 0) { exit 0 }
+          $lines = Get-Content test.log
+          $failing = $lines | Select-String -SimpleMatch '[E]' | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique
+          Write-Output "::notice::failing tests: $($failing.Count)"
+          $i = 0
+          foreach ($name in $failing) {
+            if ($i -ge 8) { break }
+            $short = if ($name.Length -gt 240) { $name.Substring(0, 240) } else { $name }
+            Write-Output "::error::$short"
+            $i++
+          }
+          Get-Content test.log | Select-Object -Last 20 | ForEach-Object { Write-Output $_ }
+          exit $code
+      - run: flutter build windows --release --build-name ${{ needs.prepare.outputs.version }} --build-number ${{ needs.prepare.outputs.build_number }}
+      - name: Collect
+        shell: pwsh
+        run: |
+          $release = "build/windows/x64/runner/Release"
+          # app-local copy of the Visual C++ runtime, so the app starts on a PC that does not have it
+          foreach ($dll in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            Copy-Item "$env:WINDIR/System32/$dll" $release
+          }
+          $name = "ARCE.AI-v${{ needs.prepare.outputs.version }}-windows-x64.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # the contents of the Release folder, with the executable at the top (the updater relies on it)
+          Compress-Archive -Path "$release/*" -DestinationPath "dist/$name"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "dist/$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+          retention-days: 7
+      - name: Publish
+        if: env.DRY_RUN != 'true'
+        uses: ./.github/actions/publish
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          title: ARCE.AI v${{ needs.prepare.outputs.version }} (Windows)
+          latest: "false" # only the Android release is "latest": the earlier native app reads /releases/latest
