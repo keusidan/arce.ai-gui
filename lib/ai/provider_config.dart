@@ -33,6 +33,7 @@ class ModelConfig {
     this.maxOutputTokens,
     this.thinking = ThinkingConfig.none,
     this.toolStyle = ToolStyle.auto,
+    this.serviceTier = '',
   });
 
   /// The name the API expects (`gpt-4o-mini`, `openai/gpt-oss-120b`, ...).
@@ -63,6 +64,21 @@ class ModelConfig {
   /// How tools reach the model (see [ToolStyle]).
   final ToolStyle toolStyle;
 
+  /// The request's `service_tier` (OpenAI's Chat Completions: `auto`, `default`, `flex`, `priority` …); empty
+  /// sends none. `flex` is the cheaper, slower processing: the request then waits as long as the flex setting says.
+  final String serviceTier;
+
+  /// The tiers the editor offers (the OpenAI API reference lists them); a JSON may name another word.
+  static const serviceTiers = ['auto', 'default', 'flex', 'priority'];
+
+  bool get isFlex => serviceTier == 'flex';
+
+  /// A tier word as it can go into a request (lower-case letters and _), or empty.
+  static String cleanTier(Object? value) {
+    final word = value is String ? value.trim().toLowerCase() : '';
+    return RegExp(r'^[a-z_]{1,32}$').hasMatch(word) ? word : '';
+  }
+
   /// What the chat acts on: the user's answer, or a guess from the model's name.
   bool get supportsImages => vision ?? guessVision(id);
 
@@ -91,6 +107,7 @@ class ModelConfig {
     bool? vision,
     ThinkingConfig? thinking,
     ToolStyle? toolStyle,
+    String? serviceTier,
   }) => ModelConfig(
     id: id,
     name: name ?? this.name,
@@ -101,6 +118,7 @@ class ModelConfig {
     maxOutputTokens: maxOutputTokens,
     thinking: thinking ?? this.thinking,
     toolStyle: toolStyle ?? this.toolStyle,
+    serviceTier: serviceTier ?? this.serviceTier,
   );
 
   /// The same model with exactly these limits; null clears one (copyWith cannot).
@@ -114,6 +132,7 @@ class ModelConfig {
     maxOutputTokens: maxOutputTokens,
     thinking: thinking,
     toolStyle: toolStyle,
+    serviceTier: serviceTier,
   );
 
   /// What [info] adds to this model. Values the model already has stay, unless [overwrite]
@@ -128,6 +147,7 @@ class ModelConfig {
     maxOutputTokens: overwrite ? (info.maxOutputTokens ?? maxOutputTokens) : (maxOutputTokens ?? info.maxOutputTokens),
     thinking: thinking,
     toolStyle: toolStyle,
+    serviceTier: serviceTier,
   );
 
   Map<String, Object?> toJson() => {
@@ -140,6 +160,7 @@ class ModelConfig {
     if (maxOutputTokens != null) 'maxOutputTokens': maxOutputTokens,
     if (!thinking.isDefault) 'thinking': thinking.toJson(),
     if (toolStyle != ToolStyle.auto) 'toolStyle': toolStyle.name,
+    if (serviceTier.isNotEmpty) 'serviceTier': serviceTier,
   };
 
   factory ModelConfig.fromJson(Map<String, Object?> json) {
@@ -163,6 +184,7 @@ class ModelConfig {
       maxOutputTokens: _positive(json['maxOutputTokens']),
       thinking: ThinkingConfig.fromJson(json['thinking']),
       toolStyle: ToolStyle.values.asNameMap()[json['toolStyle']] ?? ToolStyle.auto,
+      serviceTier: cleanTier(json['serviceTier'] ?? json['service_tier']),
     );
   }
 }

@@ -306,6 +306,8 @@ class OpenAiCompatibleProvider implements AiProvider {
     // the hint for the provider's prompt cache: only with the switch on, and never a thing for the cache
     // when it is off
     if (withCache && _sendsCache(request)) promptCacheField: request.cacheKey,
+    // the processing tier the user chose for this model (flex: cheaper and slower)
+    if ((modelConfig?.serviceTier ?? '').isNotEmpty) 'service_tier': modelConfig!.serviceTier,
     // what the model needs (its thinking settings) goes before the provider's own override
     ...request.extraBody,
     // the user's overrides come last, so a provider that needs different field names wins

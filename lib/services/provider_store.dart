@@ -294,6 +294,9 @@ class ProviderStore extends ChangeNotifier {
   /// built after it changes use the new value.
   Duration requestTimeout = const Duration(seconds: 120);
 
+  /// How long a request of a model on the flex tier may take (flex answers more slowly).
+  Duration flexTimeout = const Duration(seconds: 900);
+
   /// Makes the HTTP client of a provider that is built without one (tests give a scripted one).
   http.Client Function()? clientFactory;
 
@@ -342,7 +345,7 @@ class ProviderStore extends ChangeNotifier {
         onNotice?.call('${config.label}: $reason');
       },
       client: client ?? clientFactory?.call(),
-      timeout: requestTimeout,
+      timeout: (chosen?.isFlex ?? false) ? flexTimeout : requestTimeout,
     );
   }
 

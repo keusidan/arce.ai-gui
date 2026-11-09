@@ -7,6 +7,7 @@ import 'chat_page.dart';
 import 'history_page.dart';
 import 'history_panel.dart';
 import 'models_page.dart';
+import 'provider_widgets.dart' show pickAnyModel;
 import 'settings_page.dart';
 import 'svg_icons.dart';
 import 'theme.dart';
@@ -160,7 +161,8 @@ class EnginePill extends StatelessWidget {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11), side: BorderSide(color: c.line)),
           child: InkWell(
             borderRadius: BorderRadius.circular(11),
-            onTap: () => app.goTo(AppPage.models),
+            // the model that answers is chosen here, from every provider; without providers there is only the device
+            onTap: () => app.providers.providers.isEmpty ? app.goTo(AppPage.models) : pickAnyModel(context, app),
             child: Container(
               height: 34,
               constraints: BoxConstraints(maxWidth: compact ? 156 : 220),

@@ -1037,6 +1037,8 @@ class _SettingsPageState extends State<SettingsPage> {
               (x, v) => x.copyWith(mcpResultMaxChars: v), unit: ' 文字'),
           cycle(ArceSvg.cube, 'オンラインモデルの応答のタイムアウト', '最初の応答までに待つ時間', s.providerTimeoutSeconds, const [30, 60, 120, 300, 600],
               (x, v) => x.copyWith(providerTimeoutSeconds: v), unit: ' 秒'),
+          cycle(ArceSvg.cube, 'flex のモデルの応答のタイムアウト', 'service_tier を flex にしたモデル（安くて遅い処理）を待つ時間', s.flexTimeoutSeconds, const [300, 600, 900, 1800, 3600],
+              (x, v) => x.copyWith(flexTimeoutSeconds: v), unit: ' 秒'),
           cycle(ArceSvg.retry, 'ツールの繰り返しで止める回数', '同じ道具を同じ引数で、この回数呼んだら、ループとみなして止めます（引数が違えば数えません）', s.toolRepeatLimit, const [2, 3, 4, 5],
               (x, v) => x.copyWith(toolRepeatLimit: v)),
           SettingRow(

@@ -906,6 +906,7 @@ class AppController extends ChangeNotifier {
     _autoCheckActive();
     unawaited(_autoFillModelInfo());
     providers.requestTimeout = Duration(seconds: settings.value.providerTimeoutSeconds.clamp(10, 1800));
+    providers.flexTimeout = Duration(seconds: settings.value.flexTimeoutSeconds.clamp(60, 3600));
     final provider = providers.buildActive();
     if (provider != null) cloud.provider = provider;
     engine.target = provider;
@@ -1183,29 +1184,78 @@ class AppController extends ChangeNotifier {
   /// Reads the model list of provider [id] and keeps it as the provider's catalog (the models the
   /// user can pick). The models already set up only gain the limits they lacked. Returns what to
   /// tell the user.
-  Future<String> refreshModelList(String id) async {
+  Future<String> refreshModelList(String id) async => (await _readModelList(id)).$2;
+
+  /// [refreshModelList] with the number of models read (null when the list could not be read).
+  Future<(int?, String)> _readModelList(String id) async {
     final config = providers.byId(id);
-    if (config == null) return 'プロバイダが見つかりません';
-    if (!(Uri.tryParse(config.baseUrl.trim())?.hasScheme ?? false)) return 'Base URL（https://…）を入れてください';
-    if (!_listBusy.add(id)) return 'いま読み込んでいます';
+    if (config == null) return (null, 'プロバイダが見つかりません');
+    if (!(Uri.tryParse(config.baseUrl.trim())?.hasScheme ?? false)) return (null, 'Base URL（https://…）を入れてください');
+    if (!_listBusy.add(id)) return (null, 'いま読み込んでいます');
     notifyListeners();
     try {
       final provider = providers.build(config);
-      if (provider is! OpenAiCompatibleProvider) return 'このプロバイダはモデル一覧を読めません';
+      if (provider is! OpenAiCompatibleProvider) return (null, 'このプロバイダはモデル一覧を読めません');
       final infos = await provider.fetchModelInfos();
       final added = await providers.updateCatalog(id, infos);
       final withLimits = infos.where((i) => i.hasLimits).length;
-      return '${infos.length} 件のモデルを読み込みました'
-          '${(added ?? 0) > 0 ? '（新しく ${added!} 件）' : ''}'
-          '${infos.isNotEmpty && withLimits == 0 ? '。この提供元は上限を返しません（モデルの編集の「取得」で Hugging Face から調べられます）' : ''}';
+      return (
+        infos.length,
+        '${infos.length} 件のモデルを読み込みました'
+            '${(added ?? 0) > 0 ? '（新しく ${added!} 件）' : ''}'
+            '${infos.isNotEmpty && withLimits == 0 ? '。この提供元は上限を返しません（モデルの編集の「取得」で Hugging Face から調べられます）' : ''}',
+      );
     } on AiProviderException catch (e) {
-      return e.message;
+      return (null, e.message);
     } catch (e) {
-      return '取得できませんでした（$e）';
+      return (null, '取得できませんでした（$e）');
     } finally {
       _listBusy.remove(id);
       notifyListeners();
     }
+  }
+
+  /// Reads the model list of every provider at once (all at the same time), whatever its age. A provider that
+  /// has no list to read (its automatic reading is off, as for Cloudflare AI Gateway) keeps the models it has.
+  /// Returns one line for the user: how many lists were read, and which could not be, with why.
+  Future<String> refreshAllModelLists() async {
+    final all = providers.providers;
+    if (all.isEmpty) return 'プロバイダがありません。先に「プロバイダを追加」してください';
+    final readable = [for (final p in all) if (p.autoFetchModels) p];
+    final results = await Future.wait([for (final p in readable) _readModelList(p.id)]);
+    var models = 0;
+    final failed = <String>[];
+    for (var i = 0; i < readable.length; i++) {
+      final (count, message) = results[i];
+      if (count == null) {
+        failed.add('${readable[i].label}（$message）');
+      } else {
+        models += count;
+      }
+    }
+    final read = readable.length - failed.length;
+    final skipped = all.length - readable.length;
+    return '$read 件のプロバイダから、合計 $models 件のモデルを読み込みました'
+        '${skipped > 0 ? '。一覧を持たないプロバイダ $skipped 件は、登録したモデルのままです' : ''}'
+        '${failed.isEmpty ? '' : '。読めなかったもの：${failed.join('、')}'}';
+  }
+
+  /// Makes model [ref] (`provider|model`, or `local|` for the device model) the one that answers: the model is
+  /// set up in its provider when it is only in the catalog. False when it is not there any more.
+  Future<bool> chooseModel(String ref) async {
+    final bar = ref.indexOf('|');
+    if (bar <= 0) return false;
+    final providerId = ref.substring(0, bar);
+    if (providerId == ProviderList.localId) {
+      await setActiveProvider(ProviderList.localId);
+      return true;
+    }
+    if (_anyGenerating) {
+      showToast('生成中は切り替えられません');
+      return false;
+    }
+    // the store tells its listeners, and [_applyProvider] is one of them
+    return providers.selectModel(providerId, ref.substring(bar + 1));
   }
 
   /// Reads the model lists that are missing or older than the setting says, one provider at a time.

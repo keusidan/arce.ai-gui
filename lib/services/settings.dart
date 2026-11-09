@@ -86,6 +86,7 @@ class AppSettings {
     this.mcpTimeoutSeconds = 40,
     this.mcpResultMaxChars = 30000,
     this.providerTimeoutSeconds = 120,
+    this.flexTimeoutSeconds = 900,
     this.toolRepeatLimit = 3,
     this.updateRetryAttempts = 5,
     this.updateStallSeconds = 30,
@@ -304,6 +305,9 @@ class AppSettings {
 
   /// Seconds an online model may take to answer a request before it gives up.
   final int providerTimeoutSeconds;
+
+  /// How long a request of a model on the flex tier (`service_tier: flex`) may wait: flex answers more slowly.
+  final int flexTimeoutSeconds;
 
   /// How many identical tool calls in a row count as a loop.
   final int toolRepeatLimit;
@@ -647,6 +651,7 @@ class AppSettings {
     int? mcpTimeoutSeconds,
     int? mcpResultMaxChars,
     int? providerTimeoutSeconds,
+    int? flexTimeoutSeconds,
     int? toolRepeatLimit,
     int? updateRetryAttempts,
     int? updateStallSeconds,
@@ -795,6 +800,7 @@ class AppSettings {
     mcpTimeoutSeconds: mcpTimeoutSeconds ?? this.mcpTimeoutSeconds,
     mcpResultMaxChars: mcpResultMaxChars ?? this.mcpResultMaxChars,
     providerTimeoutSeconds: providerTimeoutSeconds ?? this.providerTimeoutSeconds,
+    flexTimeoutSeconds: flexTimeoutSeconds ?? this.flexTimeoutSeconds,
     toolRepeatLimit: toolRepeatLimit ?? this.toolRepeatLimit,
     updateRetryAttempts: updateRetryAttempts ?? this.updateRetryAttempts,
     updateStallSeconds: updateStallSeconds ?? this.updateStallSeconds,
@@ -945,6 +951,7 @@ class AppSettings {
     'mcpTimeoutSeconds': mcpTimeoutSeconds,
     'mcpResultMaxChars': mcpResultMaxChars,
     'providerTimeoutSeconds': providerTimeoutSeconds,
+    'flexTimeoutSeconds': flexTimeoutSeconds,
     'toolRepeatLimit': toolRepeatLimit,
     'updateRetryAttempts': updateRetryAttempts,
     'updateStallSeconds': updateStallSeconds,
@@ -1125,6 +1132,7 @@ class AppSettings {
       mcpTimeoutSeconds: whole('mcpTimeoutSeconds', d.mcpTimeoutSeconds),
       mcpResultMaxChars: whole('mcpResultMaxChars', d.mcpResultMaxChars).clamp(500, 1000000),
       providerTimeoutSeconds: whole('providerTimeoutSeconds', d.providerTimeoutSeconds),
+      flexTimeoutSeconds: whole('flexTimeoutSeconds', d.flexTimeoutSeconds).clamp(60, 3600),
       toolRepeatLimit: whole('toolRepeatLimit', d.toolRepeatLimit),
       updateRetryAttempts: whole('updateRetryAttempts', d.updateRetryAttempts),
       updateStallSeconds: whole('updateStallSeconds', d.updateStallSeconds),

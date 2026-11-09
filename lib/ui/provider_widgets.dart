@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../ai/cloudflare_gateway.dart';
 import '../ai/model_hints.dart';
@@ -8,6 +9,7 @@ import '../ai/model_tree.dart';
 import '../ai/openai_compatible.dart';
 import '../ai/provider.dart';
 import '../ai/provider_config.dart';
+import '../ai/provider_import.dart';
 import '../ai/thinking_config.dart';
 import '../services/app_controller.dart';
 import '../services/provider_store.dart';
@@ -85,6 +87,18 @@ class ProvidersSection extends StatelessWidget {
                       label: '詳細',
                       svg: ArceSvg.sliders,
                       onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => ModelDetailPage(app: app))),
+                    ),
+                    SoftButton(
+                      key: const ValueKey('providers-read-all'),
+                      label: '全プロバイダのモデルを読み込む',
+                      svg: ArceSvg.retry,
+                      onTap: providers.isEmpty ? null : () async => app.showToast(await app.refreshAllModelLists()),
+                    ),
+                    SoftButton(
+                      key: const ValueKey('providers-pick-any'),
+                      label: 'モデルを選ぶ（全プロバイダ）',
+                      svg: ArceSvg.cube,
+                      onTap: () => pickAnyModel(context, app),
                     ),
                   ],
                 ),
@@ -167,6 +181,39 @@ class ProvidersSection extends StatelessWidget {
       builder: (context) =>
           _ProviderEditor(app: app, store: app.providers, existing: existing),
     );
+  }
+}
+
+/// Chooses the model that answers from every provider's models at once (and the device model), in one tree with
+/// a search field: the chosen model and its provider are in use from then on. The device model goes to the model
+/// page when none is loaded yet.
+Future<void> pickAnyModel(BuildContext context, AppController app) async {
+  final store = app.providers;
+  final selected = store.isCloud ? '${store.activeId}|${store.activeModelId}' : '${ProviderList.localId}|';
+  final picked = await showModelPicker(
+    context,
+    title: 'モデルを選ぶ',
+    selectedKey: selected,
+    note: '登録したすべてのプロバイダのモデルです（提供元ごと）。一覧が古いときは、詳細設定の「オンライン接続」で「全プロバイダのモデルを読み込む」を押してください',
+    build: (query) => ModelTrees.forPicker(
+      store.providers,
+      query: query,
+      recent: store.recentRefs,
+      rootLeaves: const [TreeLeaf('${ProviderList.localId}|', 'ローカルモデル（この端末）')],
+      marks: app.modelMarks,
+      keepKey: selected,
+    ),
+  );
+  if (picked == null) return;
+  if (picked == '${ProviderList.localId}|' && !app.models.isLoaded) {
+    await app.setActiveProvider(ProviderList.localId);
+    app.goTo(AppPage.models);
+    return;
+  }
+  if (await app.chooseModel(picked)) {
+    final bar = picked.indexOf('|');
+    final provider = store.byId(picked.substring(0, bar));
+    app.showToast(provider == null ? 'ローカルモデルで答えます' : '${provider.label} · ${picked.substring(bar + 1)} で答えます');
   }
 }
 
@@ -320,6 +367,12 @@ class _ProviderEditorState extends State<_ProviderEditor> {
   /// The first model of a new Cloudflare provider (it has no list to pick from).
   final TextEditingController _firstModel = TextEditingController();
 
+  /// The whole provider as JSON (「JSON」): pasted to add one or several, or the one being edited.
+  bool _json = false;
+  late final TextEditingController _jsonText = TextEditingController(
+    text: widget.existing == null ? '' : ProviderImport.export(widget.existing!),
+  );
+
   // the gateway has a field of its own, so it is not shown again among the extra headers
   late final TextEditingController _headers = TextEditingController(
     text: ProviderExtras.show({
@@ -342,7 +395,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
 
   @override
   void dispose() {
-    for (final controller in [_label, _baseUrl, _key, _headers, _body, _cacheField, _account, _gateway, _firstModel]) {
+    for (final controller in [_label, _baseUrl, _key, _headers, _body, _cacheField, _account, _gateway, _firstModel, _jsonText]) {
       controller.dispose();
     }
     super.dispose();
@@ -431,7 +484,49 @@ class _ProviderEditorState extends State<_ProviderEditor> {
     }
   }
 
+  /// Saves what the JSON says: new providers (one or several), or the one being edited (its id, its model list
+  /// and, when the JSON has none, its models and key stay).
+  Future<void> _saveJson() async {
+    final existing = widget.existing;
+    final List<ImportedProvider> read;
+    try {
+      read = ProviderImport.parse(_jsonText.text, [
+        for (final p in widget.store.providers)
+          if (p.id != existing?.id) p,
+      ], keepId: existing?.id);
+    } on FormatException catch (e) {
+      setState(() => _result = e.message);
+      return;
+    }
+    for (final item in read) {
+      var config = item.config;
+      if (existing != null) {
+        config = existing.copyWith(
+          label: config.label,
+          baseUrl: config.baseUrl,
+          models: config.models.isEmpty ? existing.models : config.models,
+          headers: config.headers,
+          body: config.body,
+          supportsTools: config.supportsTools,
+          autoFetchModels: config.autoFetchModels,
+          promptCache: config.promptCache,
+          promptCacheField: config.promptCacheField,
+        );
+      }
+      await widget.store.save(config);
+      if (item.key != null) await widget.store.setKey(config.id, item.key!);
+    }
+    if (!mounted) return;
+    final app = widget.app;
+    Navigator.of(context).pop();
+    app.showToast(existing != null ? '${read.single.config.label} を保存しました' : '${read.length} 件のプロバイダを追加しました');
+    for (final item in read) {
+      if (item.config.autoFetchModels) unawaited(app.autoReadModelLists(only: item.config.id, force: true));
+    }
+  }
+
   Future<void> _save() async {
+    if (_json) return _saveJson();
     final config = _configOrExplain();
     if (config == null) return;
     if (config.baseUrl.trim().isEmpty) {
@@ -476,18 +571,58 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                 ChoiceChip(
                   key: const ValueKey('provider-kind-openai'),
                   label: Text('OpenAI 互換', style: ts(context, 11)),
-                  selected: !_cloudflare,
-                  onSelected: (_) => setState(() => _cloudflare = false),
+                  selected: !_cloudflare && !_json,
+                  onSelected: (_) => setState(() {
+                    _cloudflare = false;
+                    _json = false;
+                  }),
                 ),
                 ChoiceChip(
                   key: const ValueKey('provider-kind-cloudflare'),
                   label: Text(CloudflareGateway.label, style: ts(context, 11)),
-                  selected: _cloudflare,
-                  onSelected: (_) => setState(() => _cloudflare = true),
+                  selected: _cloudflare && !_json,
+                  onSelected: (_) => setState(() {
+                    _cloudflare = true;
+                    _json = false;
+                  }),
+                ),
+                ChoiceChip(
+                  key: const ValueKey('provider-kind-json'),
+                  label: Text('JSON', style: ts(context, 11)),
+                  selected: _json,
+                  onSelected: (_) => setState(() => _json = true),
                 ),
               ],
             ),
             const SizedBox(height: 10),
+            if (_json) ...[
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  editing
+                      ? 'このプロバイダの設定を JSON で直せます（id と、読み込んだモデル一覧はそのまま。キーは書いたときだけ変わります）。'
+                      : 'プロバイダを JSON で丸ごと追加します。1 つのオブジェクト、配列、{"providers": [...]} のどれでも、複数をまとめて入れられます。'
+                          '使える項目：name / label、baseUrl（base_url・url）、models（名前の配列か、{"id", "name", "service_tier"} の配列）、'
+                          'headers、body、tools、autoFetch、apiKey（api_key・key、または headers の "Authorization": "Bearer …"）。'
+                          'Cloudflare は {"type": "cloudflare", "account_id": "…", "gateway_id": "…"}。キーは安全な領域に保存し、設定には入れません',
+                  style: ts(context, 9.5, color: c.muted, height: 1.5),
+                ),
+              ),
+              _field('JSON', _jsonText, '{"name": "OpenAI", "baseUrl": "https://api.openai.com/v1", "models": ["gpt-5-mini"], "apiKey": "sk-…"}', maxLines: 14),
+              if (editing)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: SoftButton(
+                    label: 'JSON をコピー（キーは含みません）',
+                    svg: ArceSvg.copy,
+                    height: 28,
+                    onTap: () async {
+                      await Clipboard.setData(ClipboardData(text: ProviderImport.export(widget.existing!)));
+                      if (mounted) setState(() => _result = 'コピーしました');
+                    },
+                  ),
+                ),
+            ] else ...[
             if (_cloudflare)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
@@ -556,6 +691,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                 style: ts(context, 9.5, color: context.c.muted, height: 1.5),
               ),
             ),
+            ],
             if (_result != null) ...[
               const SizedBox(height: 10),
               Text(
@@ -574,7 +710,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                 SoftButton(
                   label: '接続を確認',
                   svg: ArceSvg.shield,
-                  onTap: _busy ? null : _check,
+                  onTap: _busy || _json ? null : _check,
                 ),
                 const SizedBox(width: 8),
                 PrimaryButton(label: '保存', onTap: _busy ? null : _save),
@@ -883,6 +1019,7 @@ class _ModelEditorState extends State<ModelEditor> {
   );
   late ThinkingConfig _thinking = widget.model.thinking;
   late ToolStyle _toolStyle = widget.model.toolStyle;
+  late String _tier = widget.model.serviceTier;
   String? _note;
   bool _busy = false;
 
@@ -927,7 +1064,7 @@ class _ModelEditorState extends State<ModelEditor> {
           prompt: _prompt.text.trim(),
           vision: _vision,
         )
-        .copyWith(thinking: _thinking.copyWith(effort: _effort.text.trim()), toolStyle: _toolStyle)
+        .copyWith(thinking: _thinking.copyWith(effort: _effort.text.trim()), toolStyle: _toolStyle, serviceTier: _tier)
         .withLimits(contextTokens: _positive(_context.text), maxOutputTokens: _positive(_maxOutput.text));
     final provider =
         widget.app.providers.byId(widget.provider.id) ?? widget.provider;
@@ -1187,6 +1324,30 @@ class _ModelEditorState extends State<ModelEditor> {
               ),
             _field('追加プロンプト', _prompt, 'このモデルにだけ送る指示（任意）', maxLines: 3),
             ..._thinkingSection(context),
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 4),
+              child: Text('処理の種類（service_tier）', style: ts(context, 12)),
+            ),
+            Text(
+              'flex は、安い代わりに返事が遅い処理です（OpenAI のモデル。Cloudflare AI Gateway の openai/… でも指定できます）。'
+              '待つ時間は「上限とタイムアウト」の「flex のモデルの応答のタイムアウト」です。対応しない提供元では、断られることがあります',
+              style: ts(context, 9.5, color: c.muted, height: 1.5),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final tier in ['', ...ModelConfig.serviceTiers, if (_tier.isNotEmpty && !ModelConfig.serviceTiers.contains(_tier)) _tier])
+                  ChoiceChip(
+                    key: ValueKey('service-tier-${tier.isEmpty ? 'none' : tier}'),
+                    label: Text(tier.isEmpty ? '指定しない' : tier, style: ts(context, 11)),
+                    selected: _tier == tier,
+                    onSelected: (_) => setState(() => _tier = tier),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,

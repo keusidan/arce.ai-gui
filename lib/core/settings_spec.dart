@@ -345,6 +345,13 @@ abstract final class AgentSettings {
       min: 10,
       max: 1800,
     ),
+    'flexTimeoutSeconds': SettingSpec(
+      key: 'flexTimeoutSeconds',
+      label: 'flex（service_tier）のモデルの応答のタイムアウト（秒）',
+      kind: SettingKind.whole,
+      min: 60,
+      max: 3600,
+    ),
     'toolRepeatLimit': SettingSpec(
       key: 'toolRepeatLimit',
       label: '同じツール呼び出しの繰り返しで止める回数',
