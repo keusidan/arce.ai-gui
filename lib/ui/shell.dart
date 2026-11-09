@@ -338,15 +338,22 @@ class _Sidebar extends StatelessWidget {
                 title: '詳細設定',
                 svg: ArceSvg.settings,
                 initiallyOpen: true,
+                // the groups of the settings screen itself (the same list, names, icons and order), so the
+                // sidebar never shows a group the screen does not have or misses one it has
                 children: [
-                  _NavItem(label: 'オンラインモデル', svg: ArceSvg.globe, onTap: () => app.openSettings(SettingsSection.online)),
-                  _NavItem(label: 'ローカルモデル', svg: ArceSvg.cube, onTap: () => app.openSettings(SettingsSection.local)),
-                  _NavItem(label: '分担モード', svg: ArceSvg.codeEdit, onTap: () => app.openSettings(SettingsSection.coding)),
-                  _NavItem(label: 'モデル全般設定', svg: ArceSvg.settings, onTap: () => app.openSettings(SettingsSection.basic)),
-                  _NavItem(label: '検索設定', svg: ArceSvg.search, onTap: () => app.openSettings(SettingsSection.search)),
-                  _NavItem(label: '表示・プライバシー', svg: ArceSvg.moon, onTap: () => app.openSettings(SettingsSection.display)),
-                  _NavItem(label: '上限とタイムアウト', svg: ArceSvg.sliders2, onTap: () => app.openSettings(SettingsSection.limits)),
-                  _NavItem(label: 'アップデート', svg: ArceSvg.retry, onTap: () => app.openSettings(SettingsSection.update)),
+                  ValueListenableBuilder<SettingsSection?>(
+                    valueListenable: app.shownSettingsGroup,
+                    builder: (context, shown, _) => Column(children: [
+                      for (final group in settingsGroups)
+                        _NavItem(
+                          key: ValueKey('sidebar-settings-${group.section.name}'),
+                          label: group.title,
+                          svg: group.icon,
+                          active: app.page == AppPage.settings && shown == group.section,
+                          onTap: () => app.openSettings(group.section),
+                        ),
+                    ]),
+                  ),
                 ],
               ),
             ]),
@@ -512,7 +519,7 @@ class _NavGroupState extends State<_NavGroup> {
 }
 
 class _NavItem extends StatelessWidget {
-  const _NavItem({required this.label, required this.svg, required this.onTap, this.active = false});
+  const _NavItem({super.key, required this.label, required this.svg, required this.onTap, this.active = false});
   final String label;
   final String svg;
   final VoidCallback onTap;

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../ai/cloudflare_gateway.dart';
 import '../ai/model_hints.dart';
 import '../ai/model_tree.dart';
 import '../ai/openai_compatible.dart';
@@ -92,7 +93,8 @@ class ProvidersSection extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   'OpenAI 互換の API ならどれでも使えます（OpenAI、Groq、OpenRouter、Ollama、LM Studio など）。'
-                  'Base URL は /chat/completions より前までです。',
+                  'Base URL は /chat/completions より前までです。'
+                  '複数の提供元を 1 つにまとめる Cloudflare AI Gateway は、「プロバイダを追加」で「${CloudflareGateway.label}」を選びます。',
                   style: ts(context, 9, color: context.c.muted, height: 1.5),
                 ),
               ),
@@ -306,8 +308,24 @@ class _ProviderEditorState extends State<_ProviderEditor> {
         : widget.store.keyOf(widget.existing!.id),
   );
 
+  /// The kind of address: any OpenAI-compatible one, or Cloudflare AI Gateway (made from the account ID).
+  late final bool _savedAsCloudflare = widget.existing != null && CloudflareGateway.isGateway(widget.existing!.baseUrl);
+  late bool _cloudflare = _savedAsCloudflare;
+  late final TextEditingController _account = TextEditingController(
+    text: CloudflareGateway.accountOf(widget.existing?.baseUrl ?? '') ?? '',
+  );
+  late final TextEditingController _gateway = TextEditingController(
+    text: _savedAsCloudflare ? CloudflareGateway.gatewayOf(widget.existing!.headers) : '',
+  );
+  /// The first model of a new Cloudflare provider (it has no list to pick from).
+  final TextEditingController _firstModel = TextEditingController();
+
+  // the gateway has a field of its own, so it is not shown again among the extra headers
   late final TextEditingController _headers = TextEditingController(
-    text: ProviderExtras.show({...?widget.existing?.headers}),
+    text: ProviderExtras.show({
+      for (final entry in {...?widget.existing?.headers}.entries)
+        if (!_savedAsCloudflare || entry.key.toLowerCase() != CloudflareGateway.gatewayHeader) entry.key: entry.value,
+    }),
   );
   late final TextEditingController _body = TextEditingController(
     text: ProviderExtras.show(widget.existing?.body ?? const {}),
@@ -324,7 +342,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
 
   @override
   void dispose() {
-    for (final controller in [_label, _baseUrl, _key, _headers, _body, _cacheField]) {
+    for (final controller in [_label, _baseUrl, _key, _headers, _body, _cacheField, _account, _gateway, _firstModel]) {
       controller.dispose();
     }
     super.dispose();
@@ -336,15 +354,19 @@ class _ProviderEditorState extends State<_ProviderEditor> {
     // a [FormatException] from the two JSON fields is shown by the caller
     final headers = ProviderExtras.parseHeaders(_headers.text);
     final body = ProviderExtras.parseBody(_body.text);
+    final name = label.isEmpty ? (_cloudflare ? CloudflareGateway.label : 'プロバイダ') : label;
     // an edited provider keeps what the editor does not show (its models and model list)
-    final base = existing ?? ProviderConfig(id: ProviderList.idFor(label, widget.store.providers), label: '', baseUrl: '');
+    final base = existing ?? ProviderConfig(id: ProviderList.idFor(name, widget.store.providers), label: '', baseUrl: '');
+    final first = _firstModel.text.trim();
     return base.copyWith(
-      label: label.isEmpty ? 'プロバイダ' : label,
-      baseUrl: _baseUrl.text.trim(),
-      headers: headers,
+      label: name,
+      baseUrl: _cloudflare ? CloudflareGateway.baseUrl(_account.text) : _baseUrl.text.trim(),
+      headers: _cloudflare ? CloudflareGateway.withGateway(headers, _gateway.text) : headers,
       body: body,
+      models: _cloudflare && base.models.isEmpty && first.isNotEmpty ? [ModelConfig(id: first, name: first)] : null,
       supportsTools: _tools,
-      autoFetchModels: _autoFetch,
+      // Cloudflare's API has no model list to read
+      autoFetchModels: _cloudflare ? false : _autoFetch,
       promptCache: _promptCache,
       promptCacheField: _cacheField.text.trim().isEmpty ? ProviderConfig.defaultPromptCacheField : _cacheField.text.trim(),
     );
@@ -352,6 +374,10 @@ class _ProviderEditorState extends State<_ProviderEditor> {
 
   /// The config the fields describe, or null (with the reason shown) when a JSON field is wrong.
   ProviderConfig? _configOrExplain() {
+    if (_cloudflare && !CloudflareGateway.isAccountId(_account.text)) {
+      setState(() => _result = 'Cloudflare のアカウント ID（英数字。wrangler whoami で確かめられます）を入れてください');
+      return null;
+    }
     try {
       final config = _config();
       if (!ProviderConfig.isValidCacheField(config.promptCacheField)) {
@@ -442,11 +468,48 @@ class _ProviderEditorState extends State<_ProviderEditor> {
               editing ? 'プロバイダを編集' : 'プロバイダを追加',
               style: ts(context, 14, weight: FontWeight.w700),
             ),
-            const SizedBox(height: 12),
-            _field('名前', _label, '例: OpenAI / Groq / 自宅の Ollama'),
-            _field('Base URL', _baseUrl, 'https://api.openai.com/v1'),
-            ListenableBuilder(listenable: _baseUrl, builder: (context, _) => ClearTextWarning(url: _baseUrl.text, what: 'APIキー')),
-            _field('APIキー', _key, 'sk-…（端末の安全な領域に保存します）', obscure: true),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                ChoiceChip(
+                  key: const ValueKey('provider-kind-openai'),
+                  label: Text('OpenAI 互換', style: ts(context, 11)),
+                  selected: !_cloudflare,
+                  onSelected: (_) => setState(() => _cloudflare = false),
+                ),
+                ChoiceChip(
+                  key: const ValueKey('provider-kind-cloudflare'),
+                  label: Text(CloudflareGateway.label, style: ts(context, 11)),
+                  selected: _cloudflare,
+                  onSelected: (_) => setState(() => _cloudflare = true),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (_cloudflare)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                  'Cloudflare のアカウント 1 つで、OpenAI・Anthropic・Google・xAI・Workers AI などのモデルを呼べます。'
+                  'モデル名は「提供元/モデル」（openai/gpt-4.1 など。Workers AI は @cf/…）で書きます。'
+                  'Workers AI 以外のモデルの料金は、Cloudflare に入れたクレジット（Unified Billing）から引かれます。',
+                  style: ts(context, 9.5, color: c.muted, height: 1.5),
+                ),
+              ),
+            _field('名前', _label, _cloudflare ? CloudflareGateway.label : '例: OpenAI / Groq / 自宅の Ollama'),
+            if (_cloudflare) ...[
+              _field('アカウント ID', _account, '英数字（wrangler whoami で確かめられます）'),
+              _field('ゲートウェイ ID（任意）', _gateway, '空なら ${CloudflareGateway.defaultGateway}（最初の呼び出しで自動で作られます）'),
+              _field('API トークン', _key, 'Account > Workers AI > Read の権限（端末の安全な領域に保存します）', obscure: true),
+              if (widget.existing?.models.isEmpty ?? true)
+                _field('最初のモデル（任意。あとで「モデル」から足せます）', _firstModel, CloudflareGateway.exampleModels.join(' / ')),
+            ] else ...[
+              _field('Base URL', _baseUrl, 'https://api.openai.com/v1'),
+              ListenableBuilder(listenable: _baseUrl, builder: (context, _) => ClearTextWarning(url: _baseUrl.text, what: 'APIキー')),
+              _field('APIキー', _key, 'sk-…（端末の安全な領域に保存します）', obscure: true),
+            ],
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -458,7 +521,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                 style: ts(context, 9.5, color: c.muted),
               ),
             ),
-            SwitchListTile(
+            if (!_cloudflare) SwitchListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,
               value: _autoFetch,

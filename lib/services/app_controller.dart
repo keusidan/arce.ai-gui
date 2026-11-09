@@ -277,6 +277,10 @@ class AppController extends ChangeNotifier {
   /// Which part of the settings page to scroll to (set by the desktop sidebar).
   final settingsSection = ValueNotifier<SettingsSection?>(null);
 
+  /// The group the settings page shows now (null: its buttons). The page sets it; the desktop sidebar marks
+  /// that group. Only meaningful while [page] is [AppPage.settings].
+  final shownSettingsGroup = ValueNotifier<SettingsSection?>(null);
+
   /// Whether the desktop sidebar is shown (the hamburger button toggles it).
   final sidebarOpen = ValueNotifier<bool>(true);
   InterruptedConversation? interrupted;

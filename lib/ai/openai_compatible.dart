@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../core/generation.dart';
+import 'cloudflare_gateway.dart';
 import 'model_info.dart';
 import 'model_list_check.dart';
 import 'provider.dart';
@@ -367,6 +368,8 @@ class OpenAiCompatibleProvider implements AiProvider {
   Future<List<ModelInfo>> fetchModelInfos() async {
     // Gemini's OpenAI-style list has only ids; its own list has each model's token limits
     if (GeminiModels.isGemini(baseUrl)) return _fetchGeminiModels();
+    // Cloudflare's REST API documents no model list: asking would only bring a 404 that says nothing
+    if (CloudflareGateway.isGateway(baseUrl)) throw const AiProviderException(CloudflareGateway.noModelList);
     final response = await _client
         .get(
           _uri('models'),
@@ -416,9 +419,11 @@ class OpenAiCompatibleProvider implements AiProvider {
 
   @override
   Future<void> verify() async {
+    // Cloudflare has no model list to read; its own check of the token is the one it documents
+    final cloudflare = CloudflareGateway.isGateway(baseUrl);
     final response = await _client
         .get(
-          _uri('models'),
+          cloudflare ? CloudflareGateway.verifyUri : _uri('models'),
           headers: {..._requestHeaders, 'Accept': 'application/json'},
         )
         .timeout(const Duration(seconds: 20));
@@ -429,7 +434,8 @@ class OpenAiCompatibleProvider implements AiProvider {
 
   String _failure(int status, String body) {
     final message = _errorMessage(body);
-    final detail = message == null ? '' : ': $message';
+    final hint = CloudflareGateway.isGateway(baseUrl) ? CloudflareGateway.refusedHint(status) : '';
+    final detail = '${message == null ? '' : ': $message'}${hint.isEmpty ? '' : '\n$hint'}';
     return switch (status) {
       401 || 403 => 'APIキーが受け付けられませんでした（HTTP $status）$detail',
       404 => '接続先が見つかりません（HTTP 404）。URL とモデル名を確認してください$detail',

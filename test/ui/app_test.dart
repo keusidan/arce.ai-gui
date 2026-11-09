@@ -14,6 +14,7 @@ import 'package:arce_ai/services/update_service.dart';
 import 'package:arce_ai/app.dart';
 import 'package:arce_ai/ui/chat_widgets.dart' show PromptTokenLine;
 import 'package:arce_ai/ui/provider_widgets.dart';
+import 'package:arce_ai/ui/settings_page.dart' show settingsGroups;
 import 'package:arce_ai/ui/theme.dart';
 import 'package:arce_ai/ui/thinking_sheet.dart';
 import 'package:arce_ai/ui/widgets.dart';
@@ -82,6 +83,29 @@ void main() {
     expect(find.textContaining('受け取りました', findRichText: true), findsWidgets);
     expect(app.chat.state.messages.length, 2);
     expect(find.text('こんにちは'), findsWidgets);
+  });
+
+  testWidgets('desktop sidebar: its settings are the groups of 詳細設定 (same names, same order), and each opens its group', (tester) async {
+    setSize(tester, const Size(1280, 1400));
+    final app = await makeApp(tester);
+    await tester.pumpWidget(ArceApp(app: app));
+    await tester.pump();
+
+    final items = find.byWidgetPredicate((w) => w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('sidebar-settings-'));
+    expect(items, findsNWidgets(SettingsSection.values.length), reason: 'every group, none missing, none extra');
+    final shown = [for (final e in items.evaluate()) (e.widget.key! as ValueKey<String>).value.substring('sidebar-settings-'.length)];
+    expect(shown, [for (final g in settingsGroups) g.section.name], reason: 'the order of the settings screen');
+    for (final g in settingsGroups) {
+      expect(find.descendant(of: find.byKey(ValueKey('sidebar-settings-${g.section.name}')), matching: find.text(g.title)), findsOneWidget);
+    }
+
+    for (final section in [SettingsSection.providers, SettingsSection.mcp, SettingsSection.reports]) {
+      await tester.tap(find.byKey(ValueKey('sidebar-settings-${section.name}')));
+      await tester.pump();
+      await tester.pump();
+      expect(app.page, AppPage.settings);
+      expect(app.shownSettingsGroup.value, section, reason: 'the page shows the group, and the sidebar marks it');
+    }
   });
 
   testWidgets('desktop layout: sidebar with navigation, and dark mode switch', (tester) async {

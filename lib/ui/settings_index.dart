@@ -57,6 +57,7 @@ final List<SettingsSearchEntry> settingsIndex = [
   _row(SettingsSection.providers, 'ローカルモデル', subtitle: 'この端末の中だけで動きます（外部に送りません）', keywords: ['local', 'ローカル', 'オフライン', 'offline', '切り替え']),
   _row(SettingsSection.providers, 'プロバイダを追加', keywords: ['provider', 'add', '追加', '接続先', 'openai', 'groq', 'openrouter', 'ollama', 'lm studio']),
   _row(SettingsSection.providers, '詳細', subtitle: 'モデル一覧の自動取得・フォールバック・送る前のトークン長のチェック', keywords: ['モデルの詳細設定', 'detail', 'fallback', 'フォールバック']),
+  _row(SettingsSection.providers, 'Cloudflare AI Gateway', subtitle: 'Cloudflare のアカウント 1 つで、OpenAI・Anthropic・Google・xAI・Workers AI などのモデルを呼べます（「プロバイダを追加」で選ぶ）', keywords: ['cloudflare', 'gateway', 'ai gateway', 'workers ai', 'まとめる', 'unified billing', 'クラウドフレア']),
   _row(SettingsSection.providers, 'Base URL', subtitle: 'Base URL は /chat/completions より前までです。', keywords: ['url', 'アドレス', 'エンドポイント', 'endpoint', 'openai 互換']),
   _row(SettingsSection.providers, 'APIキー', subtitle: 'sk-…（端末の安全な領域に保存します）', keywords: ['api key', 'key', 'キー', 'token', 'トークン', '秘密', 'secret']),
   _row(SettingsSection.providers, 'ツール呼び出しに対応', subtitle: '検索や設定の変更などを、モデルが自分で呼べるようにします。対応しないモデルではオフに', keywords: ['function calling', 'tools', 'ツール', '道具']),

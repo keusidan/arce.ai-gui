@@ -52,7 +52,7 @@ void main() {
 
     test('the titles are the ones the screen has (read from the group list of the settings page, when it is there)', () {
       final source = File('lib/ui/settings_page.dart').readAsStringSync();
-      final found = RegExp(r"_Group\(SettingsSection\.(\w+),\s*ArceSvg\.\w+,\s*'([^']*)',\s*'([^']*)'\)").allMatches(source).toList();
+      final found = RegExp(r"SettingsGroup\(SettingsSection\.(\w+),\s*ArceSvg\.\w+,\s*'([^']*)',\s*'([^']*)'\)").allMatches(source).toList();
       if (found.isEmpty) return; // the list moved: the other tests still guard the index
       expect(found, hasLength(SettingsSection.values.length));
       for (final m in found) {

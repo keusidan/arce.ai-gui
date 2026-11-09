@@ -26,28 +26,30 @@ import 'thinking_icon.dart';
 import 'update_widgets.dart';
 import 'widgets.dart';
 
-/// What one group of the settings list shows when it is closed.
-class _Group {
-  const _Group(this.section, this.icon, this.title, this.subtitle);
+/// What one group of the settings list shows when it is closed. The same list is the settings part of the
+/// desktop sidebar ([settingsGroups]), so the two always have the same groups, names and order.
+class SettingsGroup {
+  const SettingsGroup(this.section, this.icon, this.title, this.subtitle);
   final SettingsSection section;
   final String icon;
   final String title;
   final String subtitle;
 }
 
-const _groups = [
-  _Group(SettingsSection.providers, ArceSvg.cube, 'オンライン接続（プロバイダ）', 'API の接続先と、使うモデル'),
-  _Group(SettingsSection.online, ArceSvg.globe, 'オンラインモデルの設定', 'temperature・最大トークン・追加プロンプト'),
-  _Group(SettingsSection.local, ArceSvg.sliders, 'ローカルモデルの設定', 'サンプリング・コンテキスト長・スレッド・GPU'),
-  _Group(SettingsSection.coding, ArceSvg.codeEdit, '分担モード', 'plan が設計と分担数を決め、coding が調べてから実装する'),
-  _Group(SettingsSection.shell, ArceSvg.bolt, 'Linux 環境', 'アプリの中の Ubuntu でコマンドを動かす（Android）'),
-  _Group(SettingsSection.limits, ArceSvg.sliders2, '上限とタイムアウト', '添付・検索・通信・更新の上限と待ち時間'),
-  _Group(SettingsSection.mcp, ArceSvg.bolt, 'MCP サーバー', '外部の道具（GitHub など）をつなぐ'),
-  _Group(SettingsSection.basic, ArceSvg.settings, 'モデル全般設定', 'ローカルとオンライン共通：思考・回答・最大トークン・再試行'),
-  _Group(SettingsSection.search, ArceSvg.search, '検索設定', '検索サーバー・検索 API・結果の件数'),
-  _Group(SettingsSection.display, ArceSvg.moon, '表示・プライバシー', 'テーマ・思考中のアイコン'),
-  _Group(SettingsSection.update, ArceSvg.retry, 'アップデート', '自動で更新する・確認の間隔'),
-  _Group(SettingsSection.reports, ArceSvg.alert, 'エラーの報告', 'エラーを GitHub の issue に自動で送る（トークンを入れたときだけ）'),
+/// The groups of the settings screen, in the order it shows them.
+const settingsGroups = [
+  SettingsGroup(SettingsSection.providers, ArceSvg.cube, 'オンライン接続（プロバイダ）', 'API の接続先と、使うモデル'),
+  SettingsGroup(SettingsSection.online, ArceSvg.globe, 'オンラインモデルの設定', 'temperature・最大トークン・追加プロンプト'),
+  SettingsGroup(SettingsSection.local, ArceSvg.sliders, 'ローカルモデルの設定', 'サンプリング・コンテキスト長・スレッド・GPU'),
+  SettingsGroup(SettingsSection.coding, ArceSvg.codeEdit, '分担モード', 'plan が設計と分担数を決め、coding が調べてから実装する'),
+  SettingsGroup(SettingsSection.shell, ArceSvg.bolt, 'Linux 環境', 'アプリの中の Ubuntu でコマンドを動かす（Android）'),
+  SettingsGroup(SettingsSection.limits, ArceSvg.sliders2, '上限とタイムアウト', '添付・検索・通信・更新の上限と待ち時間'),
+  SettingsGroup(SettingsSection.mcp, ArceSvg.bolt, 'MCP サーバー', '外部の道具（GitHub など）をつなぐ'),
+  SettingsGroup(SettingsSection.basic, ArceSvg.settings, 'モデル全般設定', 'ローカルとオンライン共通：思考・回答・最大トークン・再試行'),
+  SettingsGroup(SettingsSection.search, ArceSvg.search, '検索設定', '検索サーバー・検索 API・結果の件数'),
+  SettingsGroup(SettingsSection.display, ArceSvg.moon, '表示・プライバシー', 'テーマ・思考中のアイコン'),
+  SettingsGroup(SettingsSection.update, ArceSvg.retry, 'アップデート', '自動で更新する・確認の間隔'),
+  SettingsGroup(SettingsSection.reports, ArceSvg.alert, 'エラーの報告', 'エラーを GitHub の issue に自動で送る（トークンを入れたときだけ）'),
 ];
 
 /// The settings: a landing page with one button for each group (two to a row), and a screen of its own
@@ -73,7 +75,10 @@ class _SettingsPageState extends State<SettingsPage> {
       _app?.settingsSection.removeListener(_consume);
       _app = app..settingsSection.addListener(_consume);
       // a group may have been asked for before this page existed (the sidebar does that)
-      WidgetsBinding.instance.addPostFrameCallback((_) => _consume());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _consume();
+        _report();
+      });
     }
   }
 
@@ -89,12 +94,22 @@ class _SettingsPageState extends State<SettingsPage> {
     final section = app?.settingsSection.value;
     if (app == null || section == null || !mounted) return;
     app.settingsSection.value = null;
-    setState(() => _section = section);
+    _show(section);
   }
 
-  void _open(SettingsSection section) => setState(() => _section = section);
+  void _open(SettingsSection section) => _show(section);
 
-  void _back() => setState(() => _section = null);
+  void _back() => _show(null);
+
+  void _show(SettingsSection? section) {
+    setState(() => _section = section);
+    _report();
+  }
+
+  /// Tells the rest of the app which group is on the screen (the sidebar marks it).
+  void _report() {
+    if (mounted) _app?.shownSettingsGroup.value = _section;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -122,7 +137,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   if (section == null)
                     _Landing(onOpen: _open)
                   else ...[
-                    _SectionHeader(group: _groups.firstWhere((g) => g.section == section), onBack: _back),
+                    _SectionHeader(group: settingsGroups.firstWhere((g) => g.section == section), onBack: _back),
                     _content(context, section, app, s, set),
                   ],
                   _Footer(app: app),
@@ -1450,18 +1465,18 @@ class _LandingState extends State<_Landing> {
           // be as tall as its own text, so the lower edges did not line up).
           Column(
             children: [
-              for (var i = 0; i < _groups.length; i += 2)
+              for (var i = 0; i < settingsGroups.length; i += 2)
                 Padding(
-                  padding: EdgeInsets.only(bottom: i + 2 < _groups.length ? _gap : 0),
+                  padding: EdgeInsets.only(bottom: i + 2 < settingsGroups.length ? _gap : 0),
                   child: IntrinsicHeight(
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(child: _GroupButton(group: _groups[i], onTap: () => widget.onOpen(_groups[i].section))),
+                        Expanded(child: _GroupButton(group: settingsGroups[i], onTap: () => widget.onOpen(settingsGroups[i].section))),
                         const SizedBox(width: _gap),
                         Expanded(
-                          child: i + 1 < _groups.length
-                              ? _GroupButton(group: _groups[i + 1], onTap: () => widget.onOpen(_groups[i + 1].section))
+                          child: i + 1 < settingsGroups.length
+                              ? _GroupButton(group: settingsGroups[i + 1], onTap: () => widget.onOpen(settingsGroups[i + 1].section))
                               : const SizedBox.shrink(),
                         ),
                       ],
@@ -1522,7 +1537,7 @@ class _LandingState extends State<_Landing> {
 class _GroupButton extends StatelessWidget {
   const _GroupButton({required this.group, required this.onTap});
 
-  final _Group group;
+  final SettingsGroup group;
   final VoidCallback onTap;
 
   @override
@@ -1569,7 +1584,7 @@ class _GroupButton extends StatelessWidget {
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({required this.group, required this.onBack});
 
-  final _Group group;
+  final SettingsGroup group;
   final VoidCallback onBack;
 
   @override
