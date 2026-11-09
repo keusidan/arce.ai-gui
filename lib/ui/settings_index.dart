@@ -44,7 +44,7 @@ final List<SettingsSearchEntry> settingsIndex = [
   _group(SettingsSection.online, 'temperature・最大トークン・追加プロンプト', ['online', 'オンライン', 'temperature', 'クラウド', 'cloud']),
   _group(SettingsSection.local, 'サンプリング・コンテキスト長・スレッド・GPU', ['local', 'ローカル', 'ローカルモデル', 'llama', 'gguf', 'メモリ', 'kv', 'キャッシュ', 'cache']),
   _group(SettingsSection.coding, 'plan が設計と分担数を決め、coding が調べてから実装する', ['coding', '分担', 'planner', 'developer', 'delegate', '並列', 'コード']),
-  _group(SettingsSection.shell, 'アプリの中の Ubuntu でコマンドを動かす（Android）', ['linux', 'ubuntu', 'proot', 'shell', 'コマンド', 'ターミナル', 'terminal', 'run_command', 'opencode', 'agy', 'antigravity', 'セッション', '対話', '秘密', '環境変数', 'workspace']),
+  _group(SettingsSection.shell, 'コマンドを動かす（Android は内蔵の Ubuntu、PC はコンテナか PC 全体）', ['linux', 'ubuntu', 'proot', 'shell', 'コマンド', 'ターミナル', 'terminal', 'run_command', 'opencode', 'agy', 'antigravity', 'セッション', '対話', '秘密', '環境変数', 'workspace']),
   _group(SettingsSection.limits, '添付・検索・通信・更新の上限と待ち時間', ['limit', 'timeout', 'タイムアウト', '上限', '制限', '待ち時間', '添付', '要約', '圧縮', 'compaction']),
   _group(SettingsSection.mcp, '外部の道具（GitHub など）をつなぐ', ['mcp', 'github', 'tool', '道具', 'ツール', 'サーバー', 'token', 'トークン', 'kaggle']),
   _group(SettingsSection.basic, 'ローカルとオンライン共通：思考・回答・最大トークン・再試行', ['thinking', '思考', '回答', '口調', 'タイトル', 'エージェント', 'agent', 'retry', '再試行']),
@@ -127,6 +127,14 @@ final List<SettingsSearchEntry> settingsIndex = [
 
   // ------------------------------------------------------------------ Linux environment
   _row(SettingsSection.shell, 'コマンド実行を使う', subtitle: 'オフにすると、モデルに run_command を渡しません', keywords: ['run_command', 'shell', 'コマンド', 'linux', 'proot'], key: 'shellEnabled'),
+  _row(SettingsSection.shell, 'サンドボックス化する', subtitle: 'PC：オンならコマンドを Docker か Podman のコンテナの中で、オフなら PC の上であなたの権限のまま動かします', keywords: ['sandbox', 'サンドボックス', 'docker', 'podman', 'コンテナ', 'container', 'pc', 'パソコン', '全体', 'アクセス']),
+  _row(SettingsSection.shell, '実行前の確認', subtitle: 'PC でサンドボックス化しないとき：自動（危険な操作は止める）・毎回確認・確認しない', keywords: ['approval', '承認', '確認', '自動', '危険', 'pc']),
+  _row(SettingsSection.shell, '危険な操作の一覧', subtitle: '自動のとき止めるコマンドの正規表現（1 行に 1 つ）', keywords: ['danger', '危険', '正規表現', 'regex', 'rm -rf', 'format', 'shutdown']),
+  _row(SettingsSection.shell, 'コマンドを渡すプログラム', subtitle: '空なら、Windows は PowerShell、ほかは bash（なければ sh）', keywords: ['shell', 'powershell', 'bash', 'zsh', 'cmd', 'シェル']),
+  _row(SettingsSection.shell, 'コンテナを動かすソフト', subtitle: '自動：Docker、なければ Podman', keywords: ['docker', 'podman', 'engine', 'コンテナ']),
+  _row(SettingsSection.shell, 'コンテナからネットワークを使う', keywords: ['network', 'ネットワーク', 'docker', 'コンテナ', 'apt']),
+  _row(SettingsSection.shell, 'イメージ', subtitle: 'コンテナを作るもと（既定 ubuntu:24.04）', keywords: ['image', 'ubuntu', 'docker', 'コンテナ']),
+  _row(SettingsSection.shell, 'コンテナ', subtitle: 'Docker / Podman とコンテナの様子、作り直す', keywords: ['container', 'コンテナ', '作り直す', 'docker', 'podman']),
   _row(SettingsSection.shell, 'Linux 環境（Ubuntu 24.04）', keywords: ['ubuntu', 'linux', 'proot', 'rootfs', 'インストール', '入れる', '削除', 'arm64']),
   _row(SettingsSection.shell, 'ワークスペース（全チャット共通）', keywords: ['workspace', '/workspace', '空にする', '容量', 'フォルダ']),
   _row(SettingsSection.shell, 'すべてのコマンドを実行前に確認する', subtitle: 'オフ（既定）では、サンドボックス（/workspace と Ubuntu 内）に収まるコマンドを自動実行し、端末の外に触れるコマンドだけ確認します', keywords: ['confirm', '確認', '承認', '許可', 'サンドボックス', 'approval'], key: 'shellConfirm'),

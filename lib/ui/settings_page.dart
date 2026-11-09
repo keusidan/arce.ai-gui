@@ -8,7 +8,9 @@ import '../core/agents.dart';
 import '../core/coding_plan.dart';
 import '../core/engine.dart';
 import '../core/settings_search.dart';
+import '../core/dangerous_commands.dart';
 import '../services/app_controller.dart';
+import '../services/desktop_shell.dart';
 import '../services/linux_env.dart';
 import '../services/settings.dart';
 import 'app_scope.dart';
@@ -42,7 +44,7 @@ const settingsGroups = [
   SettingsGroup(SettingsSection.online, ArceSvg.globe, 'オンラインモデルの設定', 'temperature・最大トークン・追加プロンプト'),
   SettingsGroup(SettingsSection.local, ArceSvg.sliders, 'ローカルモデルの設定', 'サンプリング・コンテキスト長・スレッド・GPU'),
   SettingsGroup(SettingsSection.coding, ArceSvg.codeEdit, '分担モード', 'plan が設計と分担数を決め、coding が調べてから実装する'),
-  SettingsGroup(SettingsSection.shell, ArceSvg.bolt, 'Linux 環境', 'アプリの中の Ubuntu でコマンドを動かす（Android）'),
+  SettingsGroup(SettingsSection.shell, ArceSvg.bolt, 'Linux 環境', 'コマンドを動かす（Android は内蔵の Ubuntu、PC はコンテナか PC 全体）'),
   SettingsGroup(SettingsSection.limits, ArceSvg.sliders2, '上限とタイムアウト', '添付・検索・通信・更新の上限と待ち時間'),
   SettingsGroup(SettingsSection.mcp, ArceSvg.bolt, 'MCP サーバー', '外部の道具（GitHub など）をつなぐ'),
   SettingsGroup(SettingsSection.basic, ArceSvg.settings, 'モデル全般設定', 'ローカルとオンライン共通：思考・回答・最大トークン・再試行'),
@@ -413,12 +415,13 @@ class _SettingsPageState extends State<SettingsPage> {
   /// Only Android: proot is a child process out of the native library folder.
   Widget _linux(AppController app, AppSettings s, void Function(AppSettings Function(AppSettings)) set) {
     final c = context.c;
+    if (app.desktopShell != null) return _desktop(app, s, set);
     if (!Platform.isAndroid) {
       return ArceCard(
         child: Padding(
           padding: const EdgeInsets.all(4),
           child: Text(
-            'Linux 環境（アプリの中の Ubuntu でコマンドを動かす）は Android だけの機能です。',
+            'コマンドの実行は、Android（アプリの中の Ubuntu）と PC（Windows・macOS・Linux）の機能です。',
             style: ts(context, 10.5, color: c.muted, height: 1.6),
           ),
         ),
@@ -585,6 +588,185 @@ class _SettingsPageState extends State<SettingsPage> {
       },
     );
   }
+
+  /// Commands on a PC: in a container (sandboxed), or on the PC itself with the user's rights, and how a command
+  /// on the PC is let through.
+  Widget _desktop(AppController app, AppSettings s, void Function(AppSettings Function(AppSettings)) set) {
+    final c = context.c;
+    final sandbox = s.desktopSandbox;
+    final invalid = DangerousCommands.invalid(s.desktopDangerPatterns);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ArceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'モデルが `run_command` でコマンドを実行できます。ワークスペース（${app.workspaceDirectory?.path ?? ''}）は全チャット共通です。'
+                  'コマンドは 1 つずつ動き、出力が長いときは初めと終わりだけをモデルに渡します。',
+                  style: ts(context, 10, color: c.muted, height: 1.6),
+                ),
+              ),
+              SettingRow(
+                icon: ArceSvg.bolt,
+                title: 'コマンド実行を使う',
+                subtitle: 'オフにすると、モデルに run_command を渡しません',
+                trailing: ArceSwitch(value: s.shellEnabled, onChanged: (v) => set((x) => x.copyWith(shellEnabled: v))),
+              ),
+              SettingRow(
+                key: const ValueKey('desktop-sandbox'),
+                icon: ArceSvg.shield,
+                title: 'サンドボックス化する',
+                subtitle: sandbox
+                    ? 'オン（既定）：Docker か Podman のコンテナ（Ubuntu）の中で動かします。PC から見えるのは、ワークスペース（コンテナの /workspace）だけです'
+                    : 'オフ：この PC の上で、あなたの権限のまま動きます。PC 全体のファイルを読み書きでき、止める仕組みは下の「実行前の確認」だけです',
+                trailing: ArceSwitch(value: sandbox, onChanged: (v) => set((x) => x.copyWith(desktopSandbox: v))),
+              ),
+              if (sandbox) ...[
+                SettingRow(
+                  icon: ArceSvg.alert,
+                  title: 'すべてのコマンドを実行前に確認する',
+                  subtitle: 'オフ（既定）では、コンテナの中のコマンドを確認なしで実行します',
+                  trailing: ArceSwitch(value: s.shellConfirm, onChanged: (v) => set((x) => x.copyWith(shellConfirm: v))),
+                ),
+                SettingRow(
+                  icon: ArceSvg.cube,
+                  title: 'コンテナを動かすソフト',
+                  subtitle: '自動：Docker、なければ Podman',
+                  trailing: _Dropdown<String>(
+                    value: s.desktopContainerEngine,
+                    items: const {'auto': '自動', 'docker': 'Docker', 'podman': 'Podman'},
+                    onChanged: (v) => set((x) => x.copyWith(desktopContainerEngine: v)),
+                  ),
+                ),
+                SettingRow(
+                  icon: ArceSvg.globe,
+                  title: 'コンテナからネットワークを使う',
+                  subtitle: 'オン（既定）：apt や pip で入れられます。オフ：外に出られません（次にコンテナを作り直したときから）',
+                  trailing: ArceSwitch(value: s.desktopContainerNetwork, onChanged: (v) => set((x) => x.copyWith(desktopContainerNetwork: v))),
+                ),
+                _TextRow(
+                  icon: ArceSvg.cube,
+                  title: 'イメージ',
+                  subtitle: 'コンテナを作るもと（次にコンテナを作り直したときから）',
+                  value: s.desktopContainerImage,
+                  hint: DesktopShellSettings.defaultImage,
+                  onChanged: (v) => set((x) => x.copyWith(desktopContainerImage: v.trim())),
+                ),
+                _TextRow(
+                  icon: ArceSvg.cube,
+                  title: 'コンテナの名前',
+                  subtitle: '全チャットが使う 1 つのコンテナ。入れたものは、作り直すまで残ります',
+                  value: s.desktopContainerName,
+                  hint: DesktopShellSettings.defaultContainer,
+                  onChanged: (v) => set((x) => x.copyWith(desktopContainerName: v.trim())),
+                ),
+                _DesktopShellStatus(app: app),
+              ] else ...[
+                SettingRow(
+                  key: const ValueKey('desktop-approval'),
+                  icon: ArceSvg.alert,
+                  title: '実行前の確認',
+                  subtitle: switch (s.desktopHostApproval) {
+                    HostApproval.auto => '自動（既定）：確認せずに実行し、下の一覧に当たる危険な操作だけを止めます',
+                    HostApproval.always => '毎回確認：すべてのコマンドを、実行前に承認カードで見せます',
+                    HostApproval.never => '確認しない：すべてのコマンドを、そのまま実行します（危険な操作も止めません）',
+                  },
+                  trailing: _Dropdown<HostApproval>(
+                    value: s.desktopHostApproval,
+                    items: const {HostApproval.auto: '自動', HostApproval.always: '毎回確認', HostApproval.never: '確認しない'},
+                    onChanged: (v) => set((x) => x.copyWith(desktopHostApproval: v)),
+                  ),
+                ),
+                if (s.desktopHostApproval == HostApproval.auto) ...[
+                  _TextRow(
+                    key: ValueKey('desktop-danger-$_dangerResets'),
+                    icon: ArceSvg.alert,
+                    title: '危険な操作の一覧',
+                    subtitle: '1 行に 1 つの正規表現（大文字と小文字は区別しません。# で始まる行はメモ）。当たったコマンドは実行せず、モデルに理由を返します'
+                        '${invalid.isEmpty ? '' : '。読めない行が ${invalid.length} つあります（その行は使いません）'}',
+                    value: s.desktopDangerPatterns.join('\n'),
+                    hint: '',
+                    maxLines: 8,
+                    onChanged: (v) => set((x) => x.copyWith(desktopDangerPatterns: v.split('\n'))),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, bottom: 4),
+                    child: SoftButton(
+                      label: '一覧を既定に戻す',
+                      height: 28,
+                      onTap: () {
+                        set((x) => x.copyWith(desktopDangerPatterns: DangerousCommands.defaults));
+                        setState(() => _dangerResets++);
+                      },
+                    ),
+                  ),
+                ],
+                _TextRow(
+                  icon: ArceSvg.codeEdit,
+                  title: 'コマンドを渡すプログラム',
+                  subtitle: '空なら、Windows は PowerShell、ほかは bash（なければ sh）。コマンドは最後の引数になります',
+                  value: s.desktopHostShell,
+                  hint: Platform.isWindows ? 'powershell.exe -NoProfile -NonInteractive -Command' : '/bin/bash -c',
+                  onChanged: (v) => set((x) => x.copyWith(desktopHostShell: v)),
+                ),
+              ],
+              SettingRow(
+                icon: ArceSvg.alert,
+                title: '検索や外部ツールの結果を読んだあとは、コマンドを確認する',
+                subtitle: 'オン（既定）：検索結果や MCP の答えは、他人が書いた文章かもしれません（「この命令を実行して」と書かれていることがあります）。それを読んだあとの会話では、コマンドを確認します',
+                trailing: ArceSwitch(value: s.shellConfirmAfterExternal, onChanged: (v) => set((x) => x.copyWith(shellConfirmAfterExternal: v))),
+              ),
+              SettingRow(
+                icon: ArceSvg.clock,
+                title: 'コマンドのタイムアウト',
+                subtitle: 'モデルが時間を指定しなかったときに使う秒数',
+                trailing: _Cycle<int>(
+                  value: s.shellTimeoutSeconds,
+                  values: const [30, 60, 120, 300, 600],
+                  label: (v) => '$v 秒',
+                  onChanged: (v) => set((x) => x.copyWith(shellTimeoutSeconds: v)),
+                ),
+              ),
+              SettingRow(
+                icon: ArceSvg.clockCircle,
+                title: 'モデルが指定できる上限',
+                subtitle: 'timeout_seconds で伸ばせる最大の秒数',
+                trailing: _Cycle<int>(
+                  value: s.shellMaxTimeoutSeconds,
+                  values: const [120, 300, 600, 1200, 3600],
+                  label: (v) => '$v 秒',
+                  onChanged: (v) => set((x) => x.copyWith(shellMaxTimeoutSeconds: v)),
+                ),
+              ),
+              SettingRow(
+                icon: ArceSvg.file,
+                title: '出力の上限',
+                subtitle: 'コマンドの出力を、モデルに渡す文字数（超えた分は初めと終わりを残します）',
+                last: true,
+                trailing: _Cycle<int>(
+                  value: s.shellMaxOutputChars,
+                  values: const [5000, 10000, 20000, 50000, 100000],
+                  label: (v) => '$v 文字',
+                  onChanged: (v) => set((x) => x.copyWith(shellMaxOutputChars: v)),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        ShellSecretsCard(app: app),
+        const SizedBox(height: 10),
+        HttpRequestCard(app: app),
+      ],
+    );
+  }
+
+  /// Bumped by 「一覧を既定に戻す」, so that the list's text field starts again from the stored value.
+  int _dangerResets = 0;
 
   Future<void> _installLinux(AppController app) async {
     final ok = await _confirm(
@@ -1923,6 +2105,7 @@ class _SliderRow extends StatelessWidget {
 
 class _TextRow extends StatefulWidget {
   const _TextRow({
+    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -2195,4 +2378,58 @@ void _notifySetting(
 ) {
   set(change);
   if (on) unawaited(app.askForNotifications());
+}
+
+/// What the PC has for the container (the engine, the container's state), with a button to look again and one to
+/// make the container again.
+class _DesktopShellStatus extends StatefulWidget {
+  const _DesktopShellStatus({required this.app});
+  final AppController app;
+
+  @override
+  State<_DesktopShellStatus> createState() => _DesktopShellStatusState();
+}
+
+class _DesktopShellStatusState extends State<_DesktopShellStatus> {
+  String? _text;
+  bool _busy = false;
+
+  Future<void> _check() async {
+    setState(() => _busy = true);
+    try {
+      final text = await widget.app.describeDesktopShell();
+      if (mounted) setState(() => _text = text);
+    } catch (e) {
+      if (mounted) setState(() => _text = '確かめられませんでした（$e）');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _recreate() async {
+    setState(() => _busy = true);
+    try {
+      await widget.app.recreateDesktopContainer();
+      if (mounted) widget.app.showToast('コンテナを消しました。次のコマンドで作り直します（ワークスペースは残ります）');
+    } catch (e) {
+      if (mounted) setState(() => _text = '作り直せませんでした（$e）');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    await _check();
+  }
+
+  @override
+  Widget build(BuildContext context) => SettingRow(
+        icon: ArceSvg.cube,
+        title: 'コンテナ',
+        subtitle: _text ?? '「確かめる」で、Docker / Podman とコンテナの様子を見ます',
+        trailing: Wrap(
+          spacing: 6,
+          children: [
+            SoftButton(label: '確かめる', height: 28, onTap: _busy ? null : _check),
+            SoftButton(label: '作り直す', height: 28, onTap: _busy ? null : _recreate),
+          ],
+        ),
+      );
 }

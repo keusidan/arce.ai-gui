@@ -1,15 +1,17 @@
 import 'dart:convert';
-import 'dart:io' show Directory;
+import 'dart:io' show Directory, Platform;
 
 import 'package:http/http.dart' as http;
 
 import '../ai/token_budget.dart';
+import '../core/dangerous_commands.dart';
 import '../core/protocol.dart';
 import '../core/secret_book.dart';
 import '../core/secret_placeholders.dart';
 import '../core/shell_secrets.dart';
 import '../core/tool_runtime.dart';
 import '../services/ci_client.dart';
+import '../services/desktop_shell.dart';
 import '../services/linux_env.dart';
 import '../services/shell_sessions.dart';
 import 'http_request_tool.dart';
@@ -41,6 +43,7 @@ class ShellSettings {
     this.compatMode = false,
     this.downloadConnections = 4,
     this.sessions = const ShellSessionSettings(),
+    this.desktop = const DesktopShellSettings(),
   });
 
   /// The Ubuntu Base 24.04.5 for arm64 that was checked on 2026-10-28 (29,936,675 bytes; the
@@ -71,6 +74,9 @@ class ShellSettings {
 
   /// What a session (a program that is talked to) may do.
   final ShellSessionSettings sessions;
+
+  /// How commands run on a PC (in a container, or on the PC itself).
+  final DesktopShellSettings desktop;
 
   LinuxConfig get config => LinuxConfig(
     rootfsUrl: rootfsUrl.trim(),
@@ -121,10 +127,18 @@ class McpTools {
     this.show = const ShowSettings(),
     this.workspaceDirectory,
     this.showProbe,
+    DesktopShell? desktopShell,
   })  : _cache = cache ?? {},
         _environment = environment ?? shellEnvironment,
-        _shellSupported = shellSupported ?? LinuxEnvironment.supported,
+        _desktop = desktopShell,
+        _shellSupported = shellSupported ?? (LinuxEnvironment.supported || desktopShell != null),
         _sessions = sessionManager ?? shellSessions;
+
+  /// Where commands run on a PC; null on Android (the Linux environment) and where there is no shell.
+  final DesktopShell? _desktop;
+
+  /// Sessions need a terminal under proot: Android's environment only.
+  bool get _sessionsSupported => _shellSupported && _desktop == null;
 
   final ShellSessionManager _sessions;
 
@@ -219,6 +233,11 @@ class McpTools {
       if ((ShellSecrets.names(arguments['secrets']) ?? const ['?']).isNotEmpty) return true;
       // so is one that writes a placeholder (path B): the card then says where each secret may go
       if (PlaceholderCommands.idsIn('${arguments['command'] ?? ''}').isNotEmpty) return true;
+      if (_desktop != null) {
+        // in the container everything stays inside it; on the PC the approval mode decides (a dangerous command
+        // in the automatic mode is refused when it runs, not asked about)
+        return shell.desktop.sandbox ? shell.confirm : shell.desktop.approval == HostApproval.always;
+      }
       if (shell.confirm) return true;
       return !SandboxPolicy.isInsideSandbox(McpCall(name, arguments));
     }
@@ -238,7 +257,7 @@ class McpTools {
   /// the text (it may be a shell, or a program that runs what it is told). Reading, stopping and listing
   /// change nothing.
   bool _sessionNeedsApproval(Map<String, Object?> arguments) {
-    if (!shell.enabled || !_shellSupported) return false;
+    if (!shell.enabled || !_sessionsSupported) return false;
     final action = '${arguments['action'] ?? ''}';
     if (action != 'start' && action != 'send') return false;
     if ((ShellSecrets.names(arguments['secrets']) ?? const ['?']).isNotEmpty) return true;
@@ -357,8 +376,11 @@ class McpTools {
   /// time (see [onDemand]), the three tools that look them up and call them stand in for them.
   Future<List<ToolDefinition>> definitions() async {
     final out = <ToolDefinition>[
-      if (shell.enabled && _shellSupported) _runCommandFor(shell, secrets.keys.toList(), _usableSecrets, httpRequest.enabled),
-      if (shell.enabled && _shellSupported) _shellSessionFor(shell, _usableSecrets),
+      if (shell.enabled && _shellSupported)
+        _desktop == null
+            ? _runCommandFor(shell, secrets.keys.toList(), _usableSecrets, httpRequest.enabled)
+            : _desktopRunCommandFor(shell, _desktop.workspace.path, secrets.keys.toList(), _usableSecrets, httpRequest.enabled),
+      if (shell.enabled && _sessionsSupported) _shellSessionFor(shell, _usableSecrets),
       ...[?_http.definition()],
       ...[?_show.definition()],
       Protocol.ciStatus,
@@ -635,6 +657,41 @@ class McpTools {
     parameters: Protocol.runCommand.parameters,
   );
 
+  /// `run_command` on a PC: in the container, or on the PC itself, as the settings say.
+  static ToolDefinition _desktopRunCommandFor(
+    ShellSettings s,
+    String workspace,
+    List<String> secretNames, [
+    List<SecretInfo> usable = const [],
+    bool http = false,
+  ]) {
+    final d = s.desktop;
+    final where = d.sandbox
+        ? 'Run one shell command in a Linux container (${d.image}, Docker or Podman) on the user\'s PC. Only /workspace '
+            'is shared with the PC (it is kept, and every chat sees it); HOME is /workspace/home. What you install with '
+            'apt or pip stays in the container until the user makes it again. '
+            '${d.network ? 'The container can reach the network. ' : 'The container has no network. '}'
+            'The first command may download the image, which can take minutes. '
+        : 'Run one command directly on the user\'s PC (${Platform.operatingSystem}) with the user\'s own rights: it can '
+            'read and change every file the user can, and there is no sandbox. The working folder is the app\'s '
+            'workspace ($workspace) unless cwd names another (an absolute path of the PC; /workspace means the workspace). '
+            '${switch (d.approval) {
+              HostApproval.auto => 'Commands run without asking, but one that looks destructive (deleting a whole drive or the home folder, formatting, writing to a disk, shutting the PC down, piping a download into a shell, a forced git push ...) is refused; do it another way or ask the user to run it. ',
+              HostApproval.always => 'The user approves every command first. ',
+              HostApproval.never => 'Commands run as written, without asking. Be careful: nothing stops a destructive one. ',
+            }}';
+    return ToolDefinition(
+      name: Protocol.runCommandName,
+      description: '$where'
+          'Commands run one at a time and cannot ask for input. The output is cut when it is long, and the command is '
+          'stopped after ${s.timeoutSeconds} seconds by default or when it runs longer than timeout_seconds (at most '
+          '${s.maxTimeoutSeconds}).${d.sandbox && s.confirm ? ' The user approves every command first.' : ''}'
+          '${secretNames.isEmpty ? '' : ' Stored secrets you may ask for, by name, in secrets (the command then gets each as an environment variable of that name, the user approves that command every time, and you never see the value): ${secretNames.join(', ')}.'}'
+          '${_placeholderHint(usable, http: http)}',
+      parameters: Protocol.runCommand.parameters,
+    );
+  }
+
   /// The secrets a model may name in `{{secret:ID}}`, each with the hosts it may go to (ids and hosts, never values).
   List<SecretInfo> get _usableSecrets => [for (final e in secretBook.entries) if (e.unusableReason == null) e];
 
@@ -778,6 +835,8 @@ class McpTools {
       );
     }
     final given = plan.env;
+    final desktop = _desktop;
+    if (desktop != null) return _runDesktop(desktop, command, plan, cwd, seconds);
     try {
       // the first command installs the environment; the user approved this call already
       if (!_environment.ready) {
@@ -797,6 +856,45 @@ class McpTools {
       return ToolOutcome(
         plan.redact(outcome.describe()),
         ToolActivity('Shell', '\$ $command${plan.secretNote}', failed: !outcome.ok),
+      );
+    } catch (e) {
+      final reason = plan.redact('$e');
+      return ToolOutcome(
+        'The command could not be run: $reason',
+        ToolActivity('Shell', '実行できませんでした: $reason', failed: true),
+      );
+    }
+  }
+}
+
+extension on McpTools {
+  /// `run_command` on a PC: refuses a dangerous command when the PC is not sandboxed and the mode is automatic,
+  /// then runs it in the container or on the PC.
+  Future<ToolOutcome> _runDesktop(DesktopShell desktop, String command, _SecretPlan plan, String cwd, int seconds) async {
+    final d = shell.desktop;
+    if (!d.sandbox && d.approval == HostApproval.auto) {
+      final hit = DangerousCommands.match(command, d.dangerPatterns);
+      if (hit != null) {
+        return ToolOutcome(
+          'Refused, nothing was run: on this PC (no sandbox) a command that matches the list of dangerous commands is not '
+          'run automatically (it matched: $hit). Do it another way, or tell the user what you wanted to run and why; '
+          'the user can run it, or change the approval mode in the settings.',
+          ToolActivity('Shell', '危険な操作として止めました: \$ ${McpTools._shorten(command)}', failed: true),
+        );
+      }
+    }
+    try {
+      final outcome = await desktop.run(
+        settings: d,
+        command: plan.command,
+        cwd: d.sandbox ? (cwd.isEmpty ? '/workspace' : cwd) : cwd,
+        timeoutSeconds: seconds,
+        maxOutputChars: shell.maxOutputChars,
+        secrets: plan.env,
+      );
+      return ToolOutcome(
+        plan.redact(outcome.describe()),
+        ToolActivity('Shell', '${d.sandbox ? '' : '（PC）'}\$ $command${plan.secretNote}', failed: !outcome.ok),
       );
     } catch (e) {
       final reason = plan.redact('$e');

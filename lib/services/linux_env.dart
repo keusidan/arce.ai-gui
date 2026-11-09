@@ -152,9 +152,10 @@ class ShellOutcome {
     }
     if (stdout.trim().isEmpty && stderr.trim().isEmpty) buffer.writeln('（出力はありません）');
     if (truncated) buffer.writeln('（出力が長いため、初めと終わりだけにしました）');
+    // a PC does not measure the workspace (both are 0): only the time is said
     buffer.writeln('所要: ${(elapsedMs / 1000).toStringAsFixed(1)}秒'
-        '・ワークスペース ${formatBytes(workspaceBytes)}'
-        '${workspaceLimitBytes > 0 ? ' / ${formatBytes(workspaceLimitBytes)}' : ''}');
+        '${workspaceBytes == 0 && workspaceLimitBytes == 0 ? '' : '・ワークスペース ${formatBytes(workspaceBytes)}'
+            '${workspaceLimitBytes > 0 ? ' / ${formatBytes(workspaceLimitBytes)}' : ''}'}');
     return buffer.toString().trimRight();
   }
 }

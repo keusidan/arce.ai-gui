@@ -650,6 +650,16 @@ abstract final class AgentSettings {
     'linuxRootfsSha256',
     // where the names of the Linux environment are looked up: a chosen resolver can answer for any site
     'linuxDns',
+    // commands on a PC: a message must not take a command out of its container, stop the question or the
+    // refusal before a command on the PC, change which program runs them, or swap the image or the container
+    'desktopSandbox',
+    'desktopHostApproval',
+    'desktopDangerPatterns',
+    'desktopHostShell',
+    'desktopContainerEngine',
+    'desktopContainerImage',
+    'desktopContainerName',
+    'desktopContainerNetwork',
   };
 
   static bool isEditable(String key) => specs.containsKey(key);

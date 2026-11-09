@@ -5,6 +5,8 @@ import 'package:arce_ai/core/settings_spec.dart';
 import 'package:arce_ai/core/search.dart';
 import 'package:arce_ai/core/shell_secrets.dart';
 import 'package:arce_ai/mcp/mcp_server.dart';
+import 'package:arce_ai/core/dangerous_commands.dart';
+import 'package:arce_ai/services/desktop_shell.dart';
 import 'package:arce_ai/services/settings.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +42,25 @@ void main() {
     expect(const AppSettings().updateRepo, 'keusidan/arce.ai-gui');
     final mine = AppSettings.fromJson({'updateRepo': 'me/fork', 'errorReportRepo': 'me/fork'});
     expect((mine.updateRepo, mine.errorReportRepo), ('me/fork', 'me/fork'), reason: 'a repository the user typed is kept');
+  });
+
+  test('the commands on a PC: sandboxed and automatic by default, every value survives a save, and a bad one falls back', () {
+    const d = AppSettings();
+    expect((d.desktopSandbox, d.desktopHostApproval, d.desktopContainerImage), (true, HostApproval.auto, 'ubuntu:24.04'));
+    expect(d.desktopDangerPatterns, DangerousCommands.defaults);
+    final custom = AppSettings.fromJson(const AppSettings(
+      desktopSandbox: false,
+      desktopHostApproval: HostApproval.always,
+      desktopContainerEngine: 'podman',
+      desktopContainerNetwork: false,
+      desktopHostShell: 'zsh -c',
+      desktopDangerPatterns: [r'\bnpm publish\b'],
+    ).toJson());
+    expect((custom.desktopSandbox, custom.desktopHostApproval, custom.desktopContainerEngine, custom.desktopContainerNetwork, custom.desktopHostShell),
+        (false, HostApproval.always, 'podman', false, 'zsh -c'));
+    expect(custom.desktopDangerPatterns, [r'\bnpm publish\b']);
+    final bad = AppSettings.fromJson(const {'desktopHostApproval': 'yolo', 'desktopContainerEngine': 'lxc', 'desktopDangerPatterns': 'rm'});
+    expect((bad.desktopHostApproval, bad.desktopContainerEngine, bad.desktopDangerPatterns), (HostApproval.auto, 'auto', DangerousCommands.defaults));
   });
 
   test('the 0.9.0 model settings: defaults, round trip, and the chat may change them', () {
@@ -134,7 +155,7 @@ void main() {
     expect(AppSettings.fromJson(saved).approvedTools, ['mcp_github__push_files'], reason: 'a command and a built-in tool are never remembered, even if a file says so');
     expect(AppSettings.fromJson(const {}).approvedTools, isEmpty);
     expect(AppSettings.fromJson(const {'approvedTools': 'not a list'}).approvedTools, isEmpty);
-    for (final key in ['approvedTools', 'shellConfirmAfterExternal', 'shellConfirm', 'linuxDns', 'linuxRootfsUrl', 'linuxRootfsSha256']) {
+    for (final key in ['approvedTools', 'shellConfirmAfterExternal', 'shellConfirm', 'linuxDns', 'linuxRootfsUrl', 'linuxRootfsSha256', 'desktopSandbox', 'desktopHostApproval', 'desktopDangerPatterns', 'desktopHostShell', 'desktopContainerImage', 'desktopContainerEngine']) {
       expect(AgentSettings.isEditable(key), isFalse, reason: '$key must not be reachable from a chat message');
       expect(AgentSettings.blocked, contains(key));
     }

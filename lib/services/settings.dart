@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/attachments.dart';
 import '../core/chat_controller.dart';
 import '../core/coding_plan.dart';
+import '../core/dangerous_commands.dart';
 import '../core/compaction.dart';
 import '../core/engine.dart';
 import '../core/protocol.dart' show ToolApproval;
@@ -14,6 +15,7 @@ import '../core/search.dart';
 import '../core/shell_secrets.dart';
 import '../core/settings_spec.dart';
 import '../mcp/mcp_server.dart';
+import 'desktop_shell.dart';
 import 'kv_snapshots.dart';
 
 enum GpuOffload { auto, cpuOnly, gpuPriority, maxGpu }
@@ -163,6 +165,14 @@ class AppSettings {
     this.linuxRootfsSha256 = defaultLinuxRootfsSha256,
     this.linuxDns = '1.1.1.1 8.8.8.8',
     this.shellCompatMode = false,
+    this.desktopSandbox = true,
+    this.desktopContainerEngine = 'auto',
+    this.desktopContainerImage = DesktopShellSettings.defaultImage,
+    this.desktopContainerName = DesktopShellSettings.defaultContainer,
+    this.desktopContainerNetwork = true,
+    this.desktopHostApproval = HostApproval.auto,
+    this.desktopHostShell = '',
+    this.desktopDangerPatterns = DangerousCommands.defaults,
   });
 
   static const defaultRepo = 'keusidan/arce.ai-gui';
@@ -512,6 +522,33 @@ class AppSettings {
   /// Start proot without its seccomp filter (`PROOT_NO_SECCOMP=1`), for devices that refuse it.
   final bool shellCompatMode;
 
+  // ---- commands on a PC (Windows, macOS, Linux): see DesktopShellSettings
+
+  /// Run commands in a container of Docker or Podman (true), or on the PC itself with the user's rights.
+  final bool desktopSandbox;
+  final String desktopContainerEngine;
+  final String desktopContainerImage;
+  final String desktopContainerName;
+  final bool desktopContainerNetwork;
+
+  /// Without the sandbox: run without asking and refuse dangerous commands (auto), ask every time, or neither.
+  final HostApproval desktopHostApproval;
+  final String desktopHostShell;
+
+  /// The regular expressions of the dangerous commands (one per entry).
+  final List<String> desktopDangerPatterns;
+
+  DesktopShellSettings get desktopShell => DesktopShellSettings(
+    sandbox: desktopSandbox,
+    engine: desktopContainerEngine,
+    image: desktopContainerImage.trim().isEmpty ? DesktopShellSettings.defaultImage : desktopContainerImage.trim(),
+    container: desktopContainerName.trim().isEmpty ? DesktopShellSettings.defaultContainer : desktopContainerName.trim(),
+    network: desktopContainerNetwork,
+    approval: desktopHostApproval,
+    dangerPatterns: desktopDangerPatterns,
+    hostShell: desktopHostShell,
+  );
+
   KvSnapshotConfig get kvSnapshot => KvSnapshotConfig(
     enabled: kvSnapshotEnabled,
     maxBytes: kvSnapshotMaxMb.clamp(64, 65536) * 1024 * 1024,
@@ -689,6 +726,14 @@ class AppSettings {
     String? linuxRootfsSha256,
     String? linuxDns,
     bool? shellCompatMode,
+    bool? desktopSandbox,
+    String? desktopContainerEngine,
+    String? desktopContainerImage,
+    String? desktopContainerName,
+    bool? desktopContainerNetwork,
+    HostApproval? desktopHostApproval,
+    String? desktopHostShell,
+    List<String>? desktopDangerPatterns,
   }) => AppSettings(
     thinking: thinking ?? this.thinking,
     searchEnabled: searchEnabled ?? this.searchEnabled,
@@ -829,6 +874,14 @@ class AppSettings {
     linuxRootfsSha256: linuxRootfsSha256 ?? this.linuxRootfsSha256,
     linuxDns: linuxDns ?? this.linuxDns,
     shellCompatMode: shellCompatMode ?? this.shellCompatMode,
+    desktopSandbox: desktopSandbox ?? this.desktopSandbox,
+    desktopContainerEngine: desktopContainerEngine ?? this.desktopContainerEngine,
+    desktopContainerImage: desktopContainerImage ?? this.desktopContainerImage,
+    desktopContainerName: desktopContainerName ?? this.desktopContainerName,
+    desktopContainerNetwork: desktopContainerNetwork ?? this.desktopContainerNetwork,
+    desktopHostApproval: desktopHostApproval ?? this.desktopHostApproval,
+    desktopHostShell: desktopHostShell ?? this.desktopHostShell,
+    desktopDangerPatterns: desktopDangerPatterns ?? this.desktopDangerPatterns,
   );
 
   Map<String, Object?> toJson() => {
@@ -972,6 +1025,14 @@ class AppSettings {
     'linuxRootfsSha256': linuxRootfsSha256,
     'linuxDns': linuxDns,
     'shellCompatMode': shellCompatMode,
+    'desktopSandbox': desktopSandbox,
+    'desktopContainerEngine': desktopContainerEngine,
+    'desktopContainerImage': desktopContainerImage,
+    'desktopContainerName': desktopContainerName,
+    'desktopContainerNetwork': desktopContainerNetwork,
+    'desktopHostApproval': desktopHostApproval.name,
+    'desktopHostShell': desktopHostShell,
+    'desktopDangerPatterns': desktopDangerPatterns,
   };
 
   /// Unknown, missing or wrongly typed values fall back to the defaults, so older or damaged
@@ -1137,6 +1198,16 @@ class AppSettings {
       linuxRootfsSha256: text('linuxRootfsSha256', d.linuxRootfsSha256),
       linuxDns: text('linuxDns', d.linuxDns),
       shellCompatMode: flag('shellCompatMode', d.shellCompatMode),
+      desktopSandbox: flag('desktopSandbox', d.desktopSandbox),
+      desktopContainerEngine: const {'auto', 'docker', 'podman'}.contains(json['desktopContainerEngine']) ? json['desktopContainerEngine']! as String : d.desktopContainerEngine,
+      desktopContainerImage: text('desktopContainerImage', d.desktopContainerImage),
+      desktopContainerName: text('desktopContainerName', d.desktopContainerName),
+      desktopContainerNetwork: flag('desktopContainerNetwork', d.desktopContainerNetwork),
+      desktopHostApproval: option(HostApproval.values, 'desktopHostApproval', d.desktopHostApproval),
+      desktopHostShell: text('desktopHostShell', d.desktopHostShell),
+      desktopDangerPatterns: json['desktopDangerPatterns'] is List
+          ? [for (final p in json['desktopDangerPatterns'] as List) if (p is String) p]
+          : d.desktopDangerPatterns,
       shellConfirmAfterExternal: flag('shellConfirmAfterExternal', d.shellConfirmAfterExternal),
       notifyNeedsYou: flag('notifyNeedsYou', d.notifyNeedsYou),
       notifyDone: flag('notifyDone', d.notifyDone),

@@ -40,6 +40,7 @@ import '../engine/demo_engine.dart';
 import '../mcp/mcp_client.dart';
 import '../mcp/http_request_tool.dart';
 import '../mcp/mcp_tools.dart';
+import 'desktop_shell.dart';
 import '../mcp/show_tool.dart' show ShowSettings;
 import '../core/page_blocks.dart';
 import '../engine/hybrid_engine.dart';
@@ -104,6 +105,7 @@ class AppController extends ChangeNotifier {
     required this.engine,
     required this.preview,
     this.workspaceDirectory,
+    this.desktopShell,
     required this.errors,
     required this.linux,
     required this.availability,
@@ -244,6 +246,16 @@ class AppController extends ChangeNotifier {
   /// it, and its state for the settings screen. The tool itself runs through [McpTools].
   final LinuxEnvironment linux;
 
+  /// Where `run_command` runs on a PC (a container, or the PC itself); null on Android and iOS.
+  final DesktopShell? desktopShell;
+
+  /// What the settings screen says about the commands on a PC (the engine, the container).
+  Future<String> describeDesktopShell() async =>
+      desktopShell == null ? '' : desktopShell!.describe(settings.value.desktopShell);
+
+  /// Removes the container; the next command makes it again from the image (the workspace stays).
+  Future<void> recreateDesktopContainer() async => desktopShell?.recreate(settings.value.desktopShell);
+
   /// Shared with [updates]: a download keeps running when another app is in front.
   final ForegroundService foreground;
 
@@ -291,6 +303,8 @@ class AppController extends ChangeNotifier {
   Timer? _toastTimer;
 
   /// [supportDirectory] replaces the platform's app-data folder (tests use a temporary one).
+  static bool get _isDesktop => Platform.isLinux || Platform.isWindows || Platform.isMacOS;
+
   static Future<AppController> create({
     Directory? supportDirectory,
     UpdateService? updateService,
@@ -299,8 +313,13 @@ class AppController extends ChangeNotifier {
     ReplyNotifier? notifier,
     ModelAvailabilityStore? availability,
     Directory? workspaceDirectory,
+    DesktopShell? desktopShell,
   }) async {
     final settings = await SettingsStore.load();
+    // Android's environment keeps its workspace in the app's data folder (`LinuxEnv.kt`: filesDir/workspace); a PC
+    // keeps it in the same place. iOS runs no commands.
+    final workspace = workspaceDirectory ??
+        (LinuxEnvironment.supported || _isDesktop ? Directory('${(supportDirectory ?? await getApplicationSupportDirectory()).path}/workspace') : null);
     final providers = await ProviderStore.load();
     final device = DeviceInfoService();
     final native = NativeEngine();
@@ -332,9 +351,10 @@ class AppController extends ChangeNotifier {
         cloud: cloud,
       ),
       preview: PreviewServer(),
-      // the app's data folder is where the Linux environment keeps its workspace (`LinuxEnv.kt`: filesDir/workspace)
-      workspaceDirectory: workspaceDirectory ??
-          (LinuxEnvironment.supported ? Directory('${(supportDirectory ?? await getApplicationSupportDirectory()).path}/workspace') : null),
+      // the app's data folder is where the Linux environment keeps its workspace (`LinuxEnv.kt`: filesDir/workspace);
+      // a PC keeps it in the same place, and its container sees it as /workspace
+      workspaceDirectory: workspace,
+      desktopShell: desktopShell ?? (_isDesktop && workspace != null ? DesktopShell(workspace: workspace) : null),
       errors: ErrorReporter(
         client: reportClient,
         prefs: await SharedPreferences.getInstance(),
@@ -478,6 +498,7 @@ class AppController extends ChangeNotifier {
       dns: s.linuxDns,
       compatMode: s.shellCompatMode,
       downloadConnections: s.downloadConnections,
+      desktop: s.desktopShell,
       sessions: ShellSessionSettings(
         maxSessions: s.shellSessionMax,
         idleMinutes: s.shellSessionIdleMinutes,
@@ -524,6 +545,7 @@ class AppController extends ChangeNotifier {
   }
 
   McpTools get _mcpTools => McpTools(
+    desktopShell: desktopShell,
     _mcpServerClients(),
     cache: _mcpCache,
     ciToken: _ciToken,

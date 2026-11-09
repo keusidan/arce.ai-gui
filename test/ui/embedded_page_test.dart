@@ -208,13 +208,13 @@ void main() {
       await tester.runAsync(app.preview.dispose);
     });
 
-    testWidgets('with no workspace on the device the card says so', (tester) async {
+    testWidgets('a page that is not in the workspace (a PC has one too now) the card says so', (tester) async {
       EmbeddedPage.builder = (context, uri, height) => SizedBox(key: const ValueKey('page'), height: height);
       await showing(tester, PageBlocks.encode(const WorkspaceSource('app')));
       await tester.tap(find.text('表示'));
       await settle(tester);
       expect(find.byKey(const ValueKey('page')), findsNothing);
-      expect(find.text('この端末には、ワークスペースがありません'), findsOneWidget, reason: 'the toast');
+      expect(find.textContaining('ワークスペースに、そのページがありません'), findsOneWidget, reason: 'the toast');
       await tester.pump(const Duration(seconds: 30)); // the toast goes
     });
 
