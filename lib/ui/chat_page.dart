@@ -272,55 +272,55 @@ class _ChatPageState extends State<ChatPage> {
             ),
             _toolsAndSend(
               tools: [
-              _ToolButton(svg: ArceSvg.paperclip, onTap: _pickFiles, tooltip: 'ファイルを添付'),
-              const SizedBox(width: 2),
-              Container(width: 1, height: 19, color: c.line),
-              const SizedBox(width: 2),
-              _ToolButton(
-                svg: ArceSvg.brainLabel,
-                label: '思考',
-                on: settings.thinking,
-                tooltip: '思考の量・送り方・表示',
-                onTap: () => showThinkingSheet(context, app),
-              ),
-              ThinkingLevelSlider(app: app),
-              _ToolButton(
-                svg: ArceSvg.search,
-                label: '検索',
-                on: settings.searchEnabled,
-                onTap: () {
-                  app.settings.update((s) => s.copyWith(searchEnabled: !s.searchEnabled));
-                  app.showToast(!settings.searchEnabled ? '検索をオン' : '検索をオフ');
-                },
-              ),
-              _ToolButton(
-                svg: ArceSvg.codeEdit,
-                label: '分担',
-                on: settings.codingPlanEnabled,
-                tooltip: '分担モード：plan が設計と分担数を決め、coding が調べてから実装します',
-                onTap: () {
-                  app.settings.update((s) => s.copyWith(codingPlanEnabled: !s.codingPlanEnabled));
-                  if (settings.codingPlanEnabled) {
-                    app.showToast('分担モードをオフ');
-                  } else if (!app.settings.value.coding.isReady) {
-                    // on, but it cannot work until both models are chosen: take the user there
-                    app.showToast('plan と coding のモデルを選んでください');
-                    app.openSettings(SettingsSection.coding);
-                  } else {
-                    app.showToast('分担モードをオン');
-                  }
-                },
-              ),
+                _ToolButton(svg: ArceSvg.paperclip, onTap: _pickFiles, tooltip: 'ファイルを添付'),
+                const SizedBox(width: 2),
+                Container(width: 1, height: 19, color: c.line),
+                const SizedBox(width: 2),
+                _ToolButton(
+                  svg: ArceSvg.brainLabel,
+                  label: '思考',
+                  on: settings.thinking,
+                  tooltip: '思考の量・送り方・表示',
+                  onTap: () => showThinkingSheet(context, app),
+                ),
+                ThinkingLevelSlider(app: app),
+                _ToolButton(
+                  svg: ArceSvg.search,
+                  label: '検索',
+                  on: settings.searchEnabled,
+                  onTap: () {
+                    app.settings.update((s) => s.copyWith(searchEnabled: !s.searchEnabled));
+                    app.showToast(!settings.searchEnabled ? '検索をオン' : '検索をオフ');
+                  },
+                ),
+                _ToolButton(
+                  svg: ArceSvg.codeEdit,
+                  label: '分担',
+                  on: settings.codingPlanEnabled,
+                  tooltip: '分担モード：plan が設計と分担数を決め、coding が調べてから実装します',
+                  onTap: () {
+                    app.settings.update((s) => s.copyWith(codingPlanEnabled: !s.codingPlanEnabled));
+                    if (settings.codingPlanEnabled) {
+                      app.showToast('分担モードをオフ');
+                    } else if (!app.settings.value.coding.isReady) {
+                      // on, but it cannot work until both models are chosen: take the user there
+                      app.showToast('plan と coding のモデルを選んでください');
+                      app.openSettings(SettingsSection.coding);
+                    } else {
+                      app.showToast('分担モードをオン');
+                    }
+                  },
+                ),
               ],
               send: [
-              if (chat.isGenerating) ...[
-                if (canSend) ...[
-                  _SendButton(label: '割り込む', svg: ArceSvg.send, onTap: _send),
-                  const SizedBox(width: 6),
-                ],
-                _SendButton(label: '停止', svg: ArceSvg.stop, onTap: app.chat.stop, stop: true),
-              ] else
-                _SendButton(label: '送信', svg: ArceSvg.send, onTap: canSend ? _send : null),
+                if (chat.isGenerating) ...[
+                  if (canSend) ...[
+                    _SendButton(label: '割り込む', svg: ArceSvg.send, onTap: _send),
+                    const SizedBox(width: 6),
+                  ],
+                  _SendButton(label: '停止', svg: ArceSvg.stop, onTap: app.chat.stop, stop: true),
+                ] else
+                  _SendButton(label: '送信', svg: ArceSvg.send, onTap: canSend ? _send : null),
               ],
             ),
           ]),
@@ -396,6 +396,9 @@ class _MessagesState extends State<_Messages> {
       return row;
     }
 
+    final hasPartialProgress = last != null &&
+        (last.text.isNotEmpty || last.thinking.isNotEmpty || last.activities.isNotEmpty);
+
     return SelectionArea(
       child: ListView(
         controller: widget.scroll,
@@ -433,7 +436,18 @@ class _MessagesState extends State<_Messages> {
                         NoticeBanner(
                           text: state.error!,
                           tone: BannerTone.error,
-                          action: state.isGenerating ? null : SoftButton(label: '再試行', onTap: app.chat.regenerate),
+                          action: state.isGenerating
+                              ? null
+                              : state.canContinue && hasPartialProgress
+                                  ? Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        SoftButton(label: '途中から続行', onTap: app.chat.continueReply),
+                                        const SizedBox(width: 6),
+                                        SoftButton(label: '最初から', onTap: app.chat.regenerate),
+                                      ],
+                                    )
+                                  : SoftButton(label: '再試行', onTap: app.chat.regenerate),
                         ),
                     ]),
             ),
@@ -446,6 +460,7 @@ class _MessagesState extends State<_Messages> {
 
 class _Welcome extends StatelessWidget {
   const _Welcome({required this.app, required this.onPrompt});
+
   final AppController app;
   final ValueChanged<String> onPrompt;
 

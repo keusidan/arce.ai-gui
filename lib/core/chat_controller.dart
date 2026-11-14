@@ -134,7 +134,7 @@ class UiMessage {
             (json['tool'] as Map)['name'] as String,
             (json['tool'] as Map)['arguments'] is Map
                 ? ((json['tool'] as Map)['arguments'] as Map)
-                      .cast<String, Object?>()
+                    .cast<String, Object?>()
                 : const {},
           )
         : null,
@@ -215,7 +215,8 @@ class ChatState {
     return last.role == Role.assistant &&
         last.question == null &&
         (last.finish == FinishReason.length ||
-            last.finish == FinishReason.cancelled);
+            last.finish == FinishReason.cancelled ||
+            last.finish == FinishReason.error);
   }
 
   ChatState copyWith({
@@ -413,13 +414,15 @@ class _Attempt {
     this.thinking,
     this.answer,
     this.toolCallJson,
-    this.cutInsideToolCall,
-  );
+    this.cutInsideToolCall, {
+    this.errorMessage,
+  });
   final FinishReason reason;
   final String thinking;
   final String answer;
   final String? toolCallJson;
   final bool cutInsideToolCall;
+  final String? errorMessage;
 }
 
 /// The pieces of the next request, as texts (see [ChatController.promptParts]).
@@ -672,12 +675,12 @@ class ChatController extends ChangeNotifier {
     ];
     final thinking = config.effectiveThinking(_state.thinkingEnabled);
     String build(List<ChatMessage> history, List<ToolDefinition> toolList) => ChatMlPromptBuilder.build(
-          history,
-          toolList,
-          config.tone,
-          thinking,
-          extraInstructions: instructions,
-        );
+      history,
+      toolList,
+      config.tone,
+      thinking,
+      extraInstructions: instructions,
+    );
     final bare = build(const [], const []);
     final withTools = build(const [], tools);
     final withHistory = build(_history, tools);
@@ -740,7 +743,7 @@ class ChatController extends ChangeNotifier {
   /// Takes back a text that was queued by [interject], before the model has read it.
   void unqueue(int index) {
     if (index < 0 || index >= _state.queued.length) return;
-    _update((s) => s.copyWith(queued: [...s.queued]..removeAt(index)));
+    _update((s) => s.copyWith(queued: [..._state.queued]..removeAt(index)));
   }
 
   /// The queued texts as one message, and the queue emptied.
@@ -829,7 +832,7 @@ class ChatController extends ChangeNotifier {
         toolResponse = ProviderApproval.isApproval(selected)
             ? await _saveProvider(draft)
             : 'The user declined to add the provider. Nothing was added. '
-                  'Do not propose it again unless they ask for it.';
+                'Do not propose it again unless they ask for it.';
       } finally {
         _busy = false;
       }
@@ -902,7 +905,6 @@ class ChatController extends ChangeNotifier {
     _engine.cancel();
   }
 
-
   /// Replaces the last reply with a fresh one generated from the same context.
   Future<void> regenerate() {
     if (_state.isGenerating ||
@@ -921,14 +923,43 @@ class ChatController extends ChangeNotifier {
   Future<void> continueReply() {
     if (!_state.canContinue || _busy) return Future.value();
     final partial = _state.messages.last;
-    // The partial reply is regenerated from its own text, so drop it from the context first.
+    var roundPrefill = '';
+    var thinkingPrefill = '';
+    var earlierText = partial.text;
+    var earlierThinking = partial.thinking;
+    // The partial round is regenerated from its own text/thinking, so drop it from the context first.
     if (_history.isNotEmpty && _history.last is AssistantTurn) {
-      _history.removeLast();
+      final lastTurn = _history.removeLast() as AssistantTurn;
+      roundPrefill = lastTurn.text;
+      thinkingPrefill = lastTurn.reasoning ?? '';
+      earlierText = _stripTail(partial.text, roundPrefill);
+      earlierThinking = _stripTail(partial.thinking, thinkingPrefill);
     }
     _update(
       (s) => s.copyWith(messages: s.messages.sublist(0, s.messages.length - 1)),
     );
-    return _start(partial.text);
+    return _start(
+      roundPrefill,
+      thinkingPrefill: thinkingPrefill,
+      earlierText: earlierText,
+      earlierThinking: earlierThinking,
+      earlierThinkingMs: partial.thinkingMs,
+      activities: List.of(partial.activities),
+      originalTime: partial.time,
+    );
+  }
+
+  static String _stripTail(String full, String tail) {
+    if (tail.isEmpty) return full;
+    if (full == tail) return '';
+    final withSep = '\n\n$tail';
+    if (full.endsWith(withSep)) {
+      return full.substring(0, full.length - withSep.length);
+    }
+    if (full.endsWith(tail)) {
+      return full.substring(0, full.length - tail.length);
+    }
+    return full;
   }
 
   /// Removes the assistant turns (and tool responses) since the last user or answer message.
@@ -950,13 +981,29 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  Future<void> _start(String prefill) async {
+  Future<void> _start(
+    String prefill, {
+    String thinkingPrefill = '',
+    String earlierText = '',
+    String earlierThinking = '',
+    int earlierThinkingMs = 0,
+    List<ToolActivity> activities = const [],
+    DateTime? originalTime,
+  }) async {
     _busy = true;
     _stopRequested = false;
     _stopSignal.reset();
     meter.begin();
     try {
-      await _generate(prefill);
+      await _generate(
+        prefill,
+        thinkingPrefill: thinkingPrefill,
+        earlierText: earlierText,
+        earlierThinking: earlierThinking,
+        earlierThinkingMs: earlierThinkingMs,
+        initialActivities: activities,
+        originalTime: originalTime,
+      );
     } catch (e) {
       // anything unexpected must not leave the chat stuck in "generating"
       _fail(_nextId - 1, e.toString());
@@ -979,7 +1026,15 @@ class ChatController extends ChangeNotifier {
     return send(_takeQueued());
   }
 
-  Future<void> _generate(String prefill) async {
+  Future<void> _generate(
+    String prefill, {
+    String thinkingPrefill = '',
+    String earlierText = '',
+    String earlierThinking = '',
+    int earlierThinkingMs = 0,
+    List<ToolActivity> initialActivities = const [],
+    DateTime? originalTime,
+  }) async {
     final config = _settings();
     final agent = _agent ??= await _router.select(
       _agentRequest.$1,
@@ -1013,22 +1068,22 @@ class ChatController extends ChangeNotifier {
         : null;
 
     var id = _nextId++;
+    final activities = List<ToolActivity>.of(initialActivities);
     _append(
       UiMessage(
         id: id,
         role: Role.assistant,
-        text: prefill,
+        text: _join(earlierText, prefill),
+        thinking: _join(earlierThinking, thinkingPrefill),
+        thinkingMs: earlierThinkingMs,
+        activities: List.of(activities),
         agent: agent.displayName,
-        time: DateTime.now(),
+        time: originalTime ?? DateTime.now(),
       ),
     );
     _update((s) => s.copyWith(error: null, notice: sizeNotice));
     _store(snapshot(), generating: true);
 
-    var earlierText = '';
-    // what the model thought in the rounds before this one: each round streams only its own, and
-    // without this the thinking of the first round vanished when the second began
-    var earlierThinking = '';
     // the planner of the coding mode, or the one model that answers
     // who answers, as the stage texts say it: "plan が考えています" (an English name is set apart by a space) or "モデルが…"
     final actor = canDelegate && agent.tools.contains(Protocol.delegate) ? 'plan ' : 'モデル';
@@ -1036,9 +1091,9 @@ class ChatController extends ChangeNotifier {
     // tool calls the model wrote that could not be used (a task with no instructions, a plan that
     // loops ...): the model is told why and writes it again, instead of the reply ending in an error
     var unusableCalls = 0;
-    final activities = <ToolActivity>[];
     var rounds = 0;
     var roundPrefill = prefill;
+    var roundThinkingPrefill = thinkingPrefill;
     // A model that keeps asking for the same tool with the same arguments never finishes. The same
     // call made [toolRepeatLimit] times in this reply, in a row or with others between, is a loop;
     // a different call (another search word, another tool) is never counted as one.
@@ -1062,6 +1117,7 @@ class ChatController extends ChangeNotifier {
         config.tone,
         thinking,
         assistantPrefill: roundPrefill,
+        thinkingPrefill: roundThinkingPrefill,
         extraInstructions: instructions,
       );
       final request = GenerateRequest(
@@ -1071,7 +1127,7 @@ class ChatController extends ChangeNotifier {
         images: _images,
         agentId: agent.id,
         conversationKey: conversationKey?.call(),
-        continuation: roundPrefill.isNotEmpty,
+        continuation: roundPrefill.isNotEmpty || roundThinkingPrefill.isNotEmpty,
         assistantReasoning: [
           for (final turn in _history)
             if (turn is AssistantTurn) turn.reasoning ?? '',
@@ -1090,10 +1146,20 @@ class ChatController extends ChangeNotifier {
       late _Attempt result;
       String? unusableReason;
       while (true) {
-        try {
-          result = await _attempt(id, request, earlierText, roundPrefill, earlierThinking: earlierThinking, actor: actor);
-        } on EngineException catch (e) {
-          _fail(id, e.message);
+        result = await _attempt(
+          id,
+          request,
+          earlierText,
+          roundPrefill,
+          earlierThinking: earlierThinking,
+          thinkingPrefill: roundThinkingPrefill,
+          actor: actor,
+        );
+        if (result.errorMessage != null) {
+          if (result.answer.isNotEmpty || result.thinking.isNotEmpty) {
+            _history.add(AssistantTurn(result.answer, null, result.thinking));
+          }
+          _fail(id, result.errorMessage!);
           return;
         }
         final parsed = result.toolCallJson == null
@@ -1139,8 +1205,9 @@ class ChatController extends ChangeNotifier {
           ..add(UserTurn('[from the app] Your last tool call could not be used: $unusableReason. Call the tool again in a correct form, or answer without it.'));
         earlierThinking = _join(earlierThinking, result.thinking);
         earlierText = _join(earlierText, result.answer);
-        activities.add(ToolActivity('Tool', '道具の呼び出しが読めませんでした（$unusableReason）。書き直します', failed: true));
+        activities.add(ToolActivity('Tool', '道具の呼び出しが読めませんでした ($unusableReason)。書き直します', failed: true));
         roundPrefill = '';
+        roundThinkingPrefill = '';
         _replace(id, (m) => m.copyWith(text: earlierText, activities: List.of(activities)));
         continue;
       }
@@ -1249,12 +1316,12 @@ class ChatController extends ChangeNotifier {
           final times = (seenCalls[key] ?? 0) + 1;
           seenCalls[key] = times;
           if (times >= config.toolRepeatLimit) {
-            _fail(id, '同じ道具を同じ引数で繰り返し呼んでいます（$key）');
+            _fail(id, '同じ道具を同じ引数で繰り返し呼んでいます ($key)');
             return;
           }
           rounds++;
           if (config.maxToolRounds > 0 && rounds > config.maxToolRounds) {
-            _fail(id, 'ツールの呼び出しが上限（${config.maxToolRounds} 回）を超えました。設定の「ツール呼び出しの上限」で増やせます');
+            _fail(id, 'ツールの呼び出しが上限 (${config.maxToolRounds} 回) を超えました。設定の「ツール呼び出しの上限」で増やせます');
             return;
           }
           _update(
@@ -1271,6 +1338,7 @@ class ChatController extends ChangeNotifier {
           _history.add(ToolResponseTurn(outcome.response));
           earlierText = outcome.shown == null ? shown : _join(shown, outcome.shown!);
           roundPrefill = '';
+          roundThinkingPrefill = '';
           _replace(
             id,
             (m) =>
@@ -1313,8 +1381,8 @@ class ChatController extends ChangeNotifier {
     if (!c.enabled || context == null || context <= 0) return null;
     final limit = context * c.atPercent ~/ 100;
     int used() => Compaction.estimateTokens(
-          ChatMlPromptBuilder.build(_history, tools, config.tone, thinking, extraInstructions: instructions),
-        );
+      ChatMlPromptBuilder.build(_history, tools, config.tone, thinking, extraInstructions: instructions),
+    );
     final before = used();
     if (before <= limit) return null;
 
@@ -1347,7 +1415,7 @@ class ChatController extends ChangeNotifier {
   /// Whether [compactNow] has something to summarize: the conversation is longer than the messages kept.
   bool get canCompact => !isRunning && Compaction.cutIndex(_history, _settings().compaction.keepTurns) != null;
 
-  /// Summarizes the conversation now (the button under the input), whatever the context window says.
+  /// Summarizes the conversation now (the button under the input).
   /// Returns what happened, in a sentence for the screen.
   Future<String> compactNow() async {
     if (isRunning) return '返信の最中は要約できません';
@@ -1433,14 +1501,16 @@ class ChatController extends ChangeNotifier {
     String earlierText,
     String prefill, {
     String earlierThinking = '',
+    String thinkingPrefill = '',
     String actor = 'モデル',
   }) async {
     final task = GenerationTask();
-    final segmenter = StreamSegmenter();
+    final resumeThinking = thinkingPrefill.isNotEmpty && prefill.isEmpty && request.thinking;
+    final segmenter = StreamSegmenter(startInThinking: resumeThinking);
     var reason = FinishReason.error;
     // The text of this round, appended to as it arrives: a String is copied on every `+=`, which made
     // a long reply quadratic in its own length.
-    final thinking = StringBuffer();
+    final thinking = StringBuffer(thinkingPrefill);
     final answer = StringBuffer(prefill);
     String? toolCallJson;
     // how long the model thinks: counted from its first thinking text to its first word of the reply
@@ -1569,6 +1639,15 @@ class ChatController extends ChangeNotifier {
       }
       consume(segmenter.finish());
       flush(force: true);
+    } on EngineException catch (e) {
+      return _Attempt(
+        FinishReason.error,
+        thinking.toString(),
+        answer.toString(),
+        null,
+        false,
+        errorMessage: e.message,
+      );
     } finally {
       // a reply that was only thinking (or stopped or failed while thinking) still ends its thinking
       if (thinkingSince != null) {
@@ -1592,7 +1671,7 @@ class ChatController extends ChangeNotifier {
     GetWeather() => ('天気を調べています', call.location),
     GetTime() => ('時刻を調べています', call.timezone ?? ''),
     McpCall() => ('ツールを実行しています', call.name),
-    Delegate() => ('coding に依頼しています', [for (final t in call.tasks) t.title].where((t) => t.trim().isNotEmpty).join('、')),
+    Delegate() => ('coding に依頼しています', [for (final t in call.tasks) t.title].where((t) => t.trim().isNotEmpty).join(', ')),
     _ => ('ツールを実行しています', ''),
   };
 

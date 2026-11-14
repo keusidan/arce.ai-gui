@@ -45,7 +45,7 @@ class CloudEngine implements InferenceEngine {
 
   /// Whether the earlier reasoning goes back with the conversation. By default only for the models
   /// whose makers keep it (DeepSeek, GLM) and only while tools are function calls, which is
-  /// where their guides keep it.
+  /// where their guides keep it
   static bool replaysReasoning(ModelConfig? model, String modelId, bool native) => switch (model?.thinking.replay ?? ReasoningReplay.auto) {
     ReasoningReplay.always => true,
     ReasoningReplay.never => false,
@@ -137,10 +137,20 @@ class CloudEngine implements InferenceEngine {
     );
   }
 
+  static bool _isOpenThinkingContinuation(String prompt) {
+    final lastStart = prompt.lastIndexOf('<|im_start|>assistant\n');
+    if (lastStart < 0) return false;
+    final tail = prompt.substring(lastStart);
+    if (tail.contains('<|im_end|>')) return false;
+    return tail.contains('<think>') && !tail.contains('</think>');
+  }
+
   @override
   Stream<GenerationEvent> generate(GenerateRequest request) async* {
     _cancelled = false;
-    final adapter = CloudEventAdapter();
+    final adapter = CloudEventAdapter(
+      startInThinking: _isOpenThinkingContinuation(request.prompt),
+    );
     // fail before anything is sent when there is nothing to send, or when it cannot fit
     final first = _requestFor(provider, request);
     if (tokenPrecheck) {
@@ -168,7 +178,7 @@ class CloudEngine implements InferenceEngine {
     } on EngineException {
       rethrow;
     } catch (e) {
-      throw EngineException('プロバイダとの通信に失敗しました（$e）');
+      throw EngineException('プロバイダとの通信に失敗しました ($e) ');
     }
 
     // The chat expects a reason at the end, even when the provider sent none.

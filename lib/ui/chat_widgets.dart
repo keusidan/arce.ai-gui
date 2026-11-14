@@ -112,23 +112,26 @@ class MessageView extends StatelessWidget {
     // The reply is plain text over the whole width, like a document: no avatar, no name or role above
     // it and no bubble. Only what the user says sits in a bubble.
     final generating = isLast && state.isGenerating;
+    final hasContent = message.text.isNotEmpty ||
+        message.thinking.isNotEmpty ||
+        message.activities.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (message.thinking.trim().isNotEmpty) ThinkingBlock(
-            text: message.thinking,
-            live: generating && message.thinkingSince > 0,
-            expanded: ArceScope.maybeOf(context)?.settings.value.thinkingExpanded ?? true,
-            thinkingMs: message.thinkingMs,
-            thinkingSince: message.thinkingSince,
-          ),
+          text: message.thinking,
+          live: generating && message.thinkingSince > 0,
+          expanded: ArceScope.maybeOf(context)?.settings.value.thinkingExpanded ?? true,
+          thinkingMs: message.thinkingMs,
+          thinkingSince: message.thinkingSince,
+        ),
         for (final activity in message.activities) ActivityView(activity: activity),
         if (message.text.trim().isNotEmpty || message.finish == FinishReason.error)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
             child: SizedBox(width: double.infinity, child: RichReply(text: message.text)),
           ),
-        if (!generating && message.text.isNotEmpty) MessageActions(message: message, isLast: isLast, state: state),
+        if (!generating && hasContent) MessageActions(message: message, isLast: isLast, state: state),
       ],
     );
   }
@@ -195,15 +198,15 @@ class MarkdownBlocks extends StatelessWidget {
       CodeBlock() => CodeCard(block: block),
       ListBlock(:final items) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [for (final item in items) _listItem(context, item)]),
       Quote(:final blocks, :final raw) => Container(
-          width: double.infinity,
-          padding: const EdgeInsets.only(left: 11),
-          decoration: BoxDecoration(border: Border(left: BorderSide(color: c.line, width: 3))),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // a long quote is usually a prompt to hand to another AI: it can be copied as it is
-            if (_isLongQuote(raw)) Align(alignment: Alignment.centerRight, child: _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, raw))),
-            MarkdownBlocks(blocks: blocks),
-          ]),
-        ),
+        width: double.infinity,
+        padding: const EdgeInsets.only(left: 11),
+        decoration: BoxDecoration(border: Border(left: BorderSide(color: c.line, width: 3))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // a long quote is usually a prompt to hand to another AI: it can be copied as it is
+          if (_isLongQuote(raw)) Align(alignment: Alignment.centerRight, child: _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, raw))),
+          MarkdownBlocks(blocks: blocks),
+        ]),
+      ),
       TableBlock() => _table(context, block),
     };
   }
@@ -238,22 +241,22 @@ class MarkdownBlocks extends StatelessWidget {
   Widget _table(BuildContext context, TableBlock table) {
     final c = context.c;
     Widget cell(List<Span> spans, int column, {bool header = false}) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 280),
-            child: InlineText(
-              spans: spans,
-              size: 12,
-              height: 1.5,
-              weight: header ? FontWeight.w700 : FontWeight.w400,
-              align: switch (table.aligns[column]) {
-                ColumnAlign.left => TextAlign.left,
-                ColumnAlign.center => TextAlign.center,
-                ColumnAlign.right => TextAlign.right,
-              },
-            ),
-          ),
-        );
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 280),
+        child: InlineText(
+          spans: spans,
+          size: 12,
+          height: 1.5,
+          weight: header ? FontWeight.w700 : FontWeight.w400,
+          align: switch (table.aligns[column]) {
+            ColumnAlign.left => TextAlign.left,
+            ColumnAlign.center => TextAlign.center,
+            ColumnAlign.right => TextAlign.right,
+          },
+        ),
+      ),
+    );
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: SingleChildScrollView(
@@ -472,8 +475,8 @@ class _CodeCardState extends State<CodeCard> {
 String _describe(PageSource source) {
   if (source.title.isNotEmpty) return source.title;
   return switch (source) {
-    HtmlSource() => 'ページ（HTML）',
-    SvgSource() => '図（SVG）',
+    HtmlSource() => 'ページ (HTML)',
+    SvgSource() => '図 (SVG)',
     WorkspaceSource() => '/workspace/${source.path}',
     PortSource() => '127.0.0.1:${source.port}${source.path}',
   };
@@ -487,17 +490,17 @@ class _MiniAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            ArceIcon(svg, size: 12, color: context.c.muted),
-            const SizedBox(width: 4),
-            Text(label, style: ts(context, 10, color: context.c.muted)),
-          ]),
-        ),
-      );
+    borderRadius: BorderRadius.circular(6),
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        ArceIcon(svg, size: 12, color: context.c.muted),
+        const SizedBox(width: 4),
+        Text(label, style: ts(context, 10, color: context.c.muted)),
+      ]),
+    ),
+  );
 }
 
 class MessageActions extends StatelessWidget {
@@ -512,7 +515,8 @@ class MessageActions extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Wrap(children: [
-        _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, message.text)),
+        if (message.text.isNotEmpty)
+          _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, message.text)),
         if (isLast && !state.isGenerating && message.question == null)
           _MiniAction(label: '再試行', svg: ArceSvg.retry, onTap: () => app.chat.regenerate()),
         if (isLast && state.canContinue)
@@ -524,7 +528,7 @@ class MessageActions extends StatelessWidget {
 
 /// The model's reasoning, as the apps that run models on the device show it: a header that counts
 /// the seconds while the model thinks ("考えています… 12秒") and says how long it thought afterwards
-/// ("思考（12.3秒）"); under it the text itself, which streams in while the model thinks (in a box of
+/// ("思考 (12.3秒)"); under it the text itself, which streams in while the model thinks (in a box of
 /// limited height that follows the newest line) and stays to be read afterwards. A tap on the header
 /// folds and unfolds it. While the model thinks it is open; after that it follows the setting
 /// 思考の内容を開いたまま表示, unless the reader has opened or folded it.
@@ -620,7 +624,7 @@ class _ThinkingBlockState extends State<ThinkingBlock> {
     final elapsed = _elapsedMs;
     final title = widget.live
         ? (elapsed >= 1000 ? '考えています… ${ThinkingBlock.duration(elapsed)}' : '考えています…')
-        : (elapsed > 0 ? '思考（${ThinkingBlock.duration(elapsed)}）' : '思考プロセス');
+        : (elapsed > 0 ? '思考 (${ThinkingBlock.duration(elapsed)})' : '思考プロセス');
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 6),
@@ -916,8 +920,8 @@ class _QuestionCardState extends State<QuestionCard> {
 }
 
 /// The size of the next request in tokens, under the input box: what is typed counts too, so a long
-/// paste shows its cost before it is sent. "約 12,340 トークン（会話 8,000・入力 340・指示 1,500・道具 2,500）／
-/// 文脈 131,072（9%）"; amber when it takes most of the context, red when it does not fit. An estimate
+/// paste shows its cost before it is sent. "約 12,340 トークン (会話 8,000・入力 340・指示 1,500・道具 2,500) /
+/// 文脈 131,072 (9%) "; amber when it takes most of the context, red when it does not fit. An estimate
 /// (a third of the UTF-8 bytes), meant to show the size and the trend, not the exact bill.
 class PromptTokenLine extends StatefulWidget {
   const PromptTokenLine({super.key, required this.app, required this.draft, this.delay = const Duration(milliseconds: 350)});
@@ -938,8 +942,8 @@ class PromptTokenLine extends StatefulWidget {
     final parts = '会話 ${group(t.conversation)}・入力 ${group(t.draft)}・指示 ${group(t.system)}・道具 ${group(t.tools)}';
     final context = t.context;
     final ratio = t.ratio;
-    final tail = context == null || ratio == null ? '' : '／文脈 ${group(context)}（${(ratio * 100).round()}%）';
-    return '約 ${group(t.total)} トークン（$parts）$tail';
+    final tail = context == null || ratio == null ? '' : ' / 文脈 ${group(context)} (${(ratio * 100).round()}%)';
+    return '約 ${group(t.total)} トークン ($parts)$tail';
   }
 
   @override
@@ -1031,7 +1035,7 @@ class _PromptTokenLineState extends State<PromptTokenLine> {
 }
 
 /// The question before a tool runs: what it is (the command as it is, or the tool and its arguments one to
-/// a line, a long value folded with its size and a button that opens all of it), why it asks when that
+/// a line, long a value folded with its size and a button that opens all of it), why it asks when that
 /// is not obvious, and three buttons: run it, run it and do not ask again about this tool, and stop. It
 /// replaces the plain question card for a tool call, whose text used to be a dumped map. The buttons
 /// answer at once and only once.
@@ -1078,7 +1082,7 @@ class _ToolApprovalCardState extends State<ToolApprovalCard> {
     final call = widget.call;
     final shell = call.name == Protocol.runCommandName;
     final lines = widget.tile.title.split('\n');
-    final note = lines.length > 1 && lines[1].startsWith('（') ? lines[1] : '';
+    final note = lines.length > 1 && lines[1].startsWith('(') ? lines[1] : '';
     final body = <Widget>[];
     if (shell) {
       final cwd = '${call.arguments['cwd'] ?? '/workspace'}';
@@ -1087,7 +1091,7 @@ class _ToolApprovalCardState extends State<ToolApprovalCard> {
         ..add(_box(context, '\$ ${call.arguments['command'] ?? ''}'))
         ..add(Padding(
           padding: const EdgeInsets.only(top: 5),
-          child: Text('場所: $cwd${seconds is num ? '・最大 ${seconds.toInt()} 秒' : ''}', style: ts(context, 10.5, color: c.muted)),
+          child: Text('場所: $cwd${seconds is num ? ' ・最大 ${seconds.toInt()} 秒' : ''}', style: ts(context, 10.5, color: c.muted)),
         ));
     } else {
       for (final entry in call.arguments.entries) {
@@ -1109,13 +1113,13 @@ class _ToolApprovalCardState extends State<ToolApprovalCard> {
                 onTap: () => setState(() => open ? _open.remove(entry.key) : _open.add(entry.key)),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: Text(open ? '閉じる' : '全文を見る（${full.length} 文字）', style: ts(context, 10.5, color: c.accent, weight: FontWeight.w600)),
+                  child: Text(open ? '閉じる' : '全文を見る (${full.length} 文字) ', style: ts(context, 10.5, color: c.accent, weight: FontWeight.w600)),
                 ),
               ),
           ]),
         ));
       }
-      if (call.arguments.isEmpty) body.add(Text('（引数なし）', style: ts(context, 11, color: c.muted)));
+      if (call.arguments.isEmpty) body.add(Text(' (引数なし) ', style: ts(context, 11, color: c.muted)));
     }
     return Container(
       key: const ValueKey('tool-approval'),
@@ -1130,7 +1134,7 @@ class _ToolApprovalCardState extends State<ToolApprovalCard> {
         Row(children: [
           ArceIcon(ArceSvg.alert, size: 16, color: c.amber),
           const SizedBox(width: 7),
-          Expanded(child: Text(shell ? 'このコマンドを実行しますか？' : 'この道具を実行しますか？', style: ts(context, 13, weight: FontWeight.w700))),
+          Expanded(child: Text(shell ? 'このコマンドを実行しますか?' : 'この道具を実行しますか?', style: ts(context, 13, weight: FontWeight.w700))),
         ]),
         if (!shell)
           Padding(
