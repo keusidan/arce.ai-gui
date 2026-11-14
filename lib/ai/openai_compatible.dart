@@ -52,7 +52,6 @@ class OpenAiCompatibleProvider implements AiProvider {
   final String baseUrl;
   final String model;
 
-
   final String apiKey;
   final Map<String, String> headers;
   final Map<String, Object?> body;
@@ -441,7 +440,7 @@ class OpenAiCompatibleProvider implements AiProvider {
     return switch (status) {
       401 || 403 => 'APIキーが受け付けられませんでした（HTTP $status）$detail',
       404 => '接続先が見つかりません（HTTP 404）。URL とモデル名を確認してください$detail',
-      429 => '回数制限に達しました（HTTP 429）。少し待ってからやり直してください',
+      429 => '回数制限に達しました（HTTP 429）。少し待ってからやり直してください$detail',
       _ => 'プロバイダが失敗しました（HTTP $status）$detail',
     };
   }

@@ -76,17 +76,20 @@ Rules:
 - Only write code when the user clearly asks for it ("make", "implement", "write code", 作って, 実装して). Otherwise answer in prose.
 - If you need a decision from the user before continuing, call the ask_user tool instead of guessing.
 - Never wait with a fixed-duration sleep (e.g. sleep 5, sleep 30, or blind timers). Always wait for the actual response, process exit, or readiness condition to complete, while keeping an explicit timeout.
-- Local commands in run_command that stay within the sandbox (/workspace and the container rootfs) run automatically without user approval; decide and run them directly (auto_execute: true), and only ask for approval (auto_execute: false) when an operation reaches outside the sandbox.
+- Local commands in run_command that stay within the sandbox (/workspace and the container rootfs) run automatically without user approval; decide and run them directly (auto_execute: true), and only ask for approval (auto_execute: false)
+when an operation reaches outside the sandbox.
 - Do not repeat the wording of your previous reply; rephrase unless exact repetition is required.''';
 
   /// [assistantPrefill] is the answer so far when continuing a reply that stopped early
   /// (the "続行" action): the model picks up exactly where the text ends.
+  /// [thinkingPrefill] is the reasoning so far when continuing a reply that stopped mid-thinking.
   static String build(
     List<ChatMessage> history,
     List<ToolDefinition> tools,
     String? tone,
     bool thinking, {
     String assistantPrefill = '',
+    String thinkingPrefill = '',
     // Agent role, reply-length limit and similar app-side rules; never user-editable.
     List<String> extraInstructions = const [],
   }) {
@@ -127,10 +130,24 @@ Rules:
     b
       ..write(_imStart)
       ..write('assistant\n');
-    // Qwen3's own template disables reasoning by pre-filling an empty think block.
-    // A continuation also skips reasoning: the plan was already made in the first part.
-    if (!thinking || assistantPrefill.isNotEmpty) b.write('<think>\n\n</think>\n\n');
-    b.write(assistantPrefill);
+    if (thinkingPrefill.isNotEmpty) {
+      if (assistantPrefill.isNotEmpty) {
+        b
+          ..write('<think>\n')
+          ..write(thinkingPrefill)
+          ..write('\n</think>\n\n')
+          ..write(assistantPrefill);
+      } else {
+        b
+          ..write('<think>\n')
+          ..write(thinkingPrefill);
+      }
+    } else {
+      // Qwen3's own template disables reasoning by pre-filling an empty think block.
+      // A continuation also skips reasoning: the plan was already made in the first part.
+      if (!thinking || assistantPrefill.isNotEmpty) b.write('<think>\n\n</think>\n\n');
+      b.write(assistantPrefill);
+    }
     return b.toString();
   }
 
@@ -213,7 +230,7 @@ Rules:
         ..write(jsonEncode(signature));
     }
     b
-      ..write('\n</tools>\n\n')
+      ..write('\n</tools>\n\n\n')
       ..write('For each function call, return a json object with function name and arguments '
           'within <tool_call></tool_call> XML tags:\n')
       ..write('<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>');

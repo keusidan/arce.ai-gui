@@ -30,6 +30,11 @@ abstract final class ChatMlBridge {
       'Continue the answer above from exactly where it stops. '
       'Do not repeat what is already written and do not start over.';
 
+  /// Sent after a reply that stopped during reasoning without emitting any answer text yet.
+  static const reasoningContinuationNote =
+      'Continue from your reasoning above and finish your answer. '
+      'Do not repeat what you already reasoned and do not start over.';
+
   /// The messages of [prompt]. The reply block at the end is usually empty (it only means
   /// "answer now") and is dropped; a non-empty one is a continuation.
   ///
@@ -69,11 +74,40 @@ abstract final class ChatMlBridge {
 
       // The reply that is about to be written has no closing tag yet.
       if (close < 0) {
-        final partial = _cleanAnswer(text);
-        if (role == 'assistant' && partial.isNotEmpty) {
-          out
-            ..add(AiMessage(AiRole.assistant, text: partial))
-            ..add(const AiMessage(AiRole.user, text: continuationNote));
+        if (role == 'assistant') {
+          final thinkOpen = StreamSegmenter.thinkOpen.trim();
+          final thinkClose = StreamSegmenter.thinkClose.trim();
+          final trimmed = text.trim();
+          if (trimmed.startsWith(thinkOpen)) {
+            final endIdx = trimmed.indexOf(thinkClose);
+            if (endIdx < 0) {
+              final thought = trimmed.substring(thinkOpen.length).trim();
+              if (thought.isNotEmpty) {
+                out
+                  ..add(AiMessage(AiRole.assistant, text: '$thinkOpen\n$thought', reasoning: thought))
+                  ..add(const AiMessage(AiRole.user, text: reasoningContinuationNote));
+              }
+              break;
+            }
+            final thought = trimmed.substring(thinkOpen.length, endIdx).trim();
+            final answer = trimmed.substring(endIdx + thinkClose.length).trim();
+            if (answer.isNotEmpty) {
+              out
+                ..add(AiMessage(AiRole.assistant, text: answer, reasoning: thought))
+                ..add(const AiMessage(AiRole.user, text: continuationNote));
+            } else if (thought.isNotEmpty) {
+              out
+                ..add(AiMessage(AiRole.assistant, text: '$thinkOpen\n$thought', reasoning: thought))
+                ..add(const AiMessage(AiRole.user, text: reasoningContinuationNote));
+            }
+            break;
+          }
+          final partial = _cleanAnswer(text);
+          if (partial.isNotEmpty) {
+            out
+              ..add(AiMessage(AiRole.assistant, text: partial))
+              ..add(const AiMessage(AiRole.user, text: continuationNote));
+          }
         }
         break;
       }
@@ -193,7 +227,9 @@ abstract final class ChatMlBridge {
 /// back as a `<tool_call>` body, so the segmenter and the tool-call parser read a cloud reply
 /// exactly like a local one.
 class CloudEventAdapter {
-  bool _thinking = false;
+  CloudEventAdapter({bool startInThinking = false}) : _thinking = startInThinking;
+
+  bool _thinking;
   bool _finished = false;
 
   /// True once the provider said why it stopped.
