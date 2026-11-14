@@ -189,6 +189,9 @@ class ModelConfig {
   }
 }
 
+/// Which endpoint shape a provider uses to send turns and receive replies.
+enum ProviderApi { chatCompletions, responses }
+
 /// A provider the user added: where to send the request and which models it offers.
 ///
 /// The API key is deliberately not a field. Keys live in the platform's secure storage under
@@ -207,6 +210,8 @@ class ProviderConfig {
     this.autoFetchModels = true,
     this.promptCache = false,
     this.promptCacheField = defaultPromptCacheField,
+    this.api = ProviderApi.chatCompletions,
+    this.background = false,
   });
 
   /// The request field OpenAI documents for routing the requests of one conversation to the same cache.
@@ -252,6 +257,14 @@ class ProviderConfig {
 
   /// The name of the field the cache hint goes in (for a server that calls it something else).
   final String promptCacheField;
+
+  /// Whether this provider uses `/chat/completions` ([ProviderApi.chatCompletions]) or `/responses`
+  /// ([ProviderApi.responses]).
+  final ProviderApi api;
+
+  /// When using [ProviderApi.responses], send `background: true` and poll `GET /responses/{id}`
+  /// instead of waiting synchronously on a single HTTP connection.
+  final bool background;
 
   /// The ids the user can pick: the chosen models first, then what the catalog adds.
   List<String> get knownIds {
@@ -315,6 +328,8 @@ class ProviderConfig {
     bool? autoFetchModels,
     bool? promptCache,
     String? promptCacheField,
+    ProviderApi? api,
+    bool? background,
   }) => ProviderConfig(
     id: id,
     label: label ?? this.label,
@@ -328,6 +343,8 @@ class ProviderConfig {
     autoFetchModels: autoFetchModels ?? this.autoFetchModels,
     promptCache: promptCache ?? this.promptCache,
     promptCacheField: promptCacheField ?? this.promptCacheField,
+    api: api ?? this.api,
+    background: background ?? this.background,
   );
 
   Map<String, Object?> toJson() => {
@@ -343,6 +360,8 @@ class ProviderConfig {
     if (!autoFetchModels) 'autoFetch': false,
     if (promptCache) 'promptCache': true,
     if (promptCacheField != defaultPromptCacheField) 'promptCacheField': promptCacheField,
+    if (api != ProviderApi.chatCompletions) 'api': api.name,
+    if (background) 'background': true,
   };
 
   /// A field name that can go into a JSON body as it is; null for anything else (empty, spaces, odd characters).
@@ -402,6 +421,8 @@ class ProviderConfig {
       autoFetchModels: json['autoFetch'] is bool ? json['autoFetch']! as bool : true,
       promptCache: json['promptCache'] is bool ? json['promptCache']! as bool : false,
       promptCacheField: _fieldName(json['promptCacheField']) ?? defaultPromptCacheField,
+      api: ProviderApi.values.asNameMap()[json['api']] ?? ProviderApi.chatCompletions,
+      background: json['background'] is bool ? json['background']! as bool : false,
     );
   }
 }

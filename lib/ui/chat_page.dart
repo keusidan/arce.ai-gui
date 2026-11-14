@@ -374,6 +374,10 @@ class _MessagesState extends State<_Messages> {
       _rows.clear();
     }
     final last = state.messages.isEmpty ? null : state.messages.last;
+    final hasPartialProgress = last != null &&
+        (last.text.isNotEmpty ||
+            last.thinking.isNotEmpty ||
+            last.activities.isNotEmpty);
     // the animated card is for the time before anything arrives; the thinking block takes over then
     final showThinkingCard = state.isGenerating &&
         settings.thinking &&
@@ -433,7 +437,27 @@ class _MessagesState extends State<_Messages> {
                         NoticeBanner(
                           text: state.error!,
                           tone: BannerTone.error,
-                          action: state.isGenerating ? null : SoftButton(label: '再試行', onTap: app.chat.regenerate),
+                          action: state.isGenerating
+                              ? null
+                              : state.canContinue && hasPartialProgress
+                                  ? Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        SoftButton(
+                                          label: '途中から続行',
+                                          onTap: app.chat.continueReply,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        SoftButton(
+                                          label: '最初から',
+                                          onTap: app.chat.regenerate,
+                                        ),
+                                      ],
+                                    )
+                                  : SoftButton(
+                                      label: '再試行',
+                                      onTap: app.chat.regenerate,
+                                    ),
                         ),
                     ]),
             ),

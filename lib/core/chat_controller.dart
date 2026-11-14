@@ -215,7 +215,8 @@ class ChatState {
     return last.role == Role.assistant &&
         last.question == null &&
         (last.finish == FinishReason.length ||
-            last.finish == FinishReason.cancelled);
+            last.finish == FinishReason.cancelled ||
+            last.finish == FinishReason.error);
   }
 
   ChatState copyWith({
@@ -413,13 +414,15 @@ class _Attempt {
     this.thinking,
     this.answer,
     this.toolCallJson,
-    this.cutInsideToolCall,
-  );
+    this.cutInsideToolCall, {
+    this.errorMessage,
+  });
   final FinishReason reason;
   final String thinking;
   final String answer;
   final String? toolCallJson;
   final bool cutInsideToolCall;
+  final String? errorMessage;
 }
 
 /// The pieces of the next request, as texts (see [ChatController.promptParts]).
@@ -921,14 +924,53 @@ class ChatController extends ChangeNotifier {
   Future<void> continueReply() {
     if (!_state.canContinue || _busy) return Future.value();
     final partial = _state.messages.last;
-    // The partial reply is regenerated from its own text, so drop it from the context first.
+    var roundPrefill = partial.text;
+    var thinkingPrefill = '';
+    var earlierText = '';
+    var earlierThinking = '';
+    // The partial reply is resumed from its own text (or thinking), so pop the trailing assistant
+    // turn while preserving earlier rounds' text/thinking/activities on the UI message.
     if (_history.isNotEmpty && _history.last is AssistantTurn) {
-      _history.removeLast();
+      final lastTurn = _history.removeLast() as AssistantTurn;
+      roundPrefill = lastTurn.text;
+      earlierText = _stripTail(partial.text, roundPrefill);
+      final lastReasoning = lastTurn.reasoning ?? '';
+      if (roundPrefill.isEmpty && lastReasoning.isNotEmpty) {
+        thinkingPrefill = lastReasoning;
+        earlierThinking = _stripTail(partial.thinking, thinkingPrefill);
+      } else {
+        earlierThinking = partial.thinking;
+      }
+    } else if (roundPrefill.isEmpty && partial.thinking.isNotEmpty) {
+      thinkingPrefill = partial.thinking;
+    } else {
+      earlierThinking = partial.thinking;
     }
     _update(
       (s) => s.copyWith(messages: s.messages.sublist(0, s.messages.length - 1)),
     );
-    return _start(partial.text);
+    return _start(
+      roundPrefill,
+      thinkingPrefill: thinkingPrefill,
+      initialEarlierText: earlierText,
+      initialEarlierThinking: earlierThinking,
+      earlierThinkingMs: partial.thinkingMs,
+      initialActivities: List.of(partial.activities),
+      originalTime: partial.time,
+    );
+  }
+
+  static String _stripTail(String full, String tail) {
+    if (tail.isEmpty) return full;
+    if (full == tail) return '';
+    final separator = '\n\n$tail';
+    if (full.endsWith(separator)) {
+      return full.substring(0, full.length - separator.length);
+    }
+    if (full.endsWith(tail)) {
+      return full.substring(0, full.length - tail.length);
+    }
+    return '';
   }
 
   /// Removes the assistant turns (and tool responses) since the last user or answer message.
@@ -950,13 +992,29 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  Future<void> _start(String prefill) async {
+  Future<void> _start(
+    String prefill, {
+    String thinkingPrefill = '',
+    String initialEarlierText = '',
+    String initialEarlierThinking = '',
+    int earlierThinkingMs = 0,
+    List<ToolActivity> initialActivities = const [],
+    DateTime? originalTime,
+  }) async {
     _busy = true;
     _stopRequested = false;
     _stopSignal.reset();
     meter.begin();
     try {
-      await _generate(prefill);
+      await _generate(
+        prefill,
+        thinkingPrefill: thinkingPrefill,
+        initialEarlierText: initialEarlierText,
+        initialEarlierThinking: initialEarlierThinking,
+        earlierThinkingMs: earlierThinkingMs,
+        initialActivities: initialActivities,
+        originalTime: originalTime,
+      );
     } catch (e) {
       // anything unexpected must not leave the chat stuck in "generating"
       _fail(_nextId - 1, e.toString());
@@ -979,7 +1037,15 @@ class ChatController extends ChangeNotifier {
     return send(_takeQueued());
   }
 
-  Future<void> _generate(String prefill) async {
+  Future<void> _generate(
+    String prefill, {
+    String thinkingPrefill = '',
+    String initialEarlierText = '',
+    String initialEarlierThinking = '',
+    int earlierThinkingMs = 0,
+    List<ToolActivity> initialActivities = const [],
+    DateTime? originalTime,
+  }) async {
     final config = _settings();
     final agent = _agent ??= await _router.select(
       _agentRequest.$1,
@@ -1013,22 +1079,27 @@ class ChatController extends ChangeNotifier {
         : null;
 
     var id = _nextId++;
+    final initialText = _join(initialEarlierText, prefill);
+    final initialThinking = _join(initialEarlierThinking, thinkingPrefill);
     _append(
       UiMessage(
         id: id,
         role: Role.assistant,
-        text: prefill,
+        text: initialText,
+        thinking: initialThinking,
+        thinkingMs: earlierThinkingMs,
+        activities: List.of(initialActivities),
         agent: agent.displayName,
-        time: DateTime.now(),
+        time: originalTime ?? DateTime.now(),
       ),
     );
     _update((s) => s.copyWith(error: null, notice: sizeNotice));
     _store(snapshot(), generating: true);
 
-    var earlierText = '';
+    var earlierText = initialEarlierText;
     // what the model thought in the rounds before this one: each round streams only its own, and
     // without this the thinking of the first round vanished when the second began
-    var earlierThinking = '';
+    var earlierThinking = initialEarlierThinking;
     // the planner of the coding mode, or the one model that answers
     // who answers, as the stage texts say it: "plan が考えています" (an English name is set apart by a space) or "モデルが…"
     final actor = canDelegate && agent.tools.contains(Protocol.delegate) ? 'plan ' : 'モデル';
@@ -1036,9 +1107,10 @@ class ChatController extends ChangeNotifier {
     // tool calls the model wrote that could not be used (a task with no instructions, a plan that
     // loops ...): the model is told why and writes it again, instead of the reply ending in an error
     var unusableCalls = 0;
-    final activities = <ToolActivity>[];
+    final activities = List<ToolActivity>.of(initialActivities);
     var rounds = 0;
     var roundPrefill = prefill;
+    var roundThinkingPrefill = thinkingPrefill;
     // A model that keeps asking for the same tool with the same arguments never finishes. The same
     // call made [toolRepeatLimit] times in this reply, in a row or with others between, is a loop;
     // a different call (another search word, another tool) is never counted as one.
@@ -1062,6 +1134,7 @@ class ChatController extends ChangeNotifier {
         config.tone,
         thinking,
         assistantPrefill: roundPrefill,
+        thinkingPrefill: roundThinkingPrefill,
         extraInstructions: instructions,
       );
       final request = GenerateRequest(
@@ -1071,7 +1144,7 @@ class ChatController extends ChangeNotifier {
         images: _images,
         agentId: agent.id,
         conversationKey: conversationKey?.call(),
-        continuation: roundPrefill.isNotEmpty,
+        continuation: roundPrefill.isNotEmpty || roundThinkingPrefill.isNotEmpty,
         assistantReasoning: [
           for (final turn in _history)
             if (turn is AssistantTurn) turn.reasoning ?? '',
@@ -1090,10 +1163,22 @@ class ChatController extends ChangeNotifier {
       late _Attempt result;
       String? unusableReason;
       while (true) {
-        try {
-          result = await _attempt(id, request, earlierText, roundPrefill, earlierThinking: earlierThinking, actor: actor);
-        } on EngineException catch (e) {
-          _fail(id, e.message);
+        result = await _attempt(
+          id,
+          request,
+          earlierText,
+          roundPrefill,
+          earlierThinking: earlierThinking,
+          thinkingPrefill: roundThinkingPrefill,
+          actor: actor,
+        );
+        if (result.errorMessage != null) {
+          if (result.answer.isNotEmpty || result.thinking.isNotEmpty) {
+            _history.add(
+              AssistantTurn(result.answer, null, result.thinking),
+            );
+          }
+          _fail(id, result.errorMessage!);
           return;
         }
         final parsed = result.toolCallJson == null
@@ -1141,6 +1226,7 @@ class ChatController extends ChangeNotifier {
         earlierText = _join(earlierText, result.answer);
         activities.add(ToolActivity('Tool', '道具の呼び出しが読めませんでした（$unusableReason）。書き直します', failed: true));
         roundPrefill = '';
+        roundThinkingPrefill = '';
         _replace(id, (m) => m.copyWith(text: earlierText, activities: List.of(activities)));
         continue;
       }
@@ -1271,6 +1357,7 @@ class ChatController extends ChangeNotifier {
           _history.add(ToolResponseTurn(outcome.response));
           earlierText = outcome.shown == null ? shown : _join(shown, outcome.shown!);
           roundPrefill = '';
+          roundThinkingPrefill = '';
           _replace(
             id,
             (m) =>
@@ -1433,14 +1520,16 @@ class ChatController extends ChangeNotifier {
     String earlierText,
     String prefill, {
     String earlierThinking = '',
+    String thinkingPrefill = '',
     String actor = 'モデル',
   }) async {
     final task = GenerationTask();
-    final segmenter = StreamSegmenter();
+    final resumeThinking = thinkingPrefill.isNotEmpty && prefill.isEmpty;
+    final segmenter = StreamSegmenter(startInThinking: resumeThinking);
     var reason = FinishReason.error;
     // The text of this round, appended to as it arrives: a String is copied on every `+=`, which made
     // a long reply quadratic in its own length.
-    final thinking = StringBuffer();
+    final thinking = StringBuffer(thinkingPrefill);
     final answer = StringBuffer(prefill);
     String? toolCallJson;
     // how long the model thinks: counted from its first thinking text to its first word of the reply
@@ -1569,6 +1658,15 @@ class ChatController extends ChangeNotifier {
       }
       consume(segmenter.finish());
       flush(force: true);
+    } on EngineException catch (e) {
+      return _Attempt(
+        FinishReason.error,
+        thinking.toString(),
+        answer.toString(),
+        null,
+        false,
+        errorMessage: e.message,
+      );
     } finally {
       // a reply that was only thinking (or stopped or failed while thinking) still ends its thinking
       if (thinkingSince != null) {

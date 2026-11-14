@@ -1049,6 +1049,81 @@ void main() {
       expect(chat.state.messages.where((m) => m.role == Role.user).map((m) => m.text), ['調べて', '一つ目\n\n二つ目']);
     });
   });
+
+  group('エラー中断時の途中継続', () {
+    test('本文・ツール履歴・思考がある途中で EngineException が起きても途中から続行できる', () async {
+      final engine = _SequenceEngine([
+        (const [Piece('<tool_call>\n{"name":"get_time","arguments":{}}\n</tool_call>'), Finished(FinishReason.eog)], null),
+        (const [Piece('<think>確認中</think>途中まで')], '通信が切れました'),
+        (const [Piece('続きの回答'), Finished(FinishReason.eog)], null),
+      ]);
+      final chat = ChatController(
+        engine,
+        toolRuntime: _Runtime((_) => const ToolOutcome('12:00', ToolActivity('Time', '12:00'))),
+      );
+      await chat.send('いま何時');
+      expect(chat.state.task, TaskState.error);
+      expect(chat.state.error, '通信が切れました');
+      expect(chat.state.canContinue, isTrue);
+      expect(chat.state.messages.last.finish, FinishReason.error);
+      expect(chat.state.messages.last.thinking, contains('確認中'));
+      expect(chat.state.messages.last.text, '途中まで');
+      expect(chat.state.messages.last.activities, hasLength(1));
+
+      await chat.continueReply();
+      expect(chat.state.task, TaskState.completed);
+      expect(engine.requests.last.continuation, isTrue);
+      expect(engine.requests.last.prompt, endsWith('途中まで'));
+      expect(chat.state.messages.last.text, '途中まで続きの回答');
+      expect(chat.state.messages.last.thinking, contains('確認中'));
+      expect(chat.state.messages.last.activities, hasLength(1));
+    });
+
+    test('思考の途中で EngineException が起きたら thinkingPrefill を使って続きから再開できる', () async {
+      final engine = _SequenceEngine([
+        (const [Piece('<think>前半の思考')], '接続中断'),
+        (const [Piece('・後半の思考</think>最終の答え'), Finished(FinishReason.eog)], null),
+      ]);
+      final chat = ChatController(engine, toolRuntime: _Runtime((_) => throw StateError('unused')));
+      await chat.send('考えて');
+      expect(chat.state.task, TaskState.error);
+      expect(chat.state.canContinue, isTrue);
+      expect(chat.state.messages.last.text, isEmpty);
+      expect(chat.state.messages.last.thinking, '前半の思考');
+
+      await chat.continueReply();
+      expect(chat.state.task, TaskState.completed);
+      expect(engine.requests.last.continuation, isTrue);
+      expect(engine.requests.last.prompt, endsWith('<think>\n前半の思考'));
+      expect(chat.state.messages.last.thinking, '前半の思考・後半の思考');
+      expect(chat.state.messages.last.text, '最終の答え');
+    });
+  });
+}
+
+class _SequenceEngine implements InferenceEngine {
+  _SequenceEngine(Iterable<(List<GenerationEvent>, String?)> steps) : _steps = Queue.of(steps);
+  final Queue<(List<GenerationEvent>, String?)> _steps;
+  final requests = <GenerateRequest>[];
+
+  @override
+  bool get isLoaded => true;
+  @override
+  Future<void> load(LoadParams params) async {}
+  @override
+  void cancel() {}
+  @override
+  Future<void> unload() async {}
+
+  @override
+  Stream<GenerationEvent> generate(GenerateRequest request) async* {
+    requests.add(request);
+    final (events, failAfter) = _steps.removeFirst();
+    for (final event in events) {
+      yield event;
+    }
+    if (failAfter != null) throw EngineException(failAfter);
+  }
 }
 
 /// Answers like [inner] after a short wait, so that a test can write a message while the reply goes on.

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:arce_ai/ai/openai_compatible.dart';
 import 'package:arce_ai/ai/provider.dart';
 import 'package:arce_ai/ai/provider_config.dart';
+import 'package:arce_ai/ai/responses_provider.dart';
 import 'package:arce_ai/services/provider_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -57,5 +58,42 @@ void main() {
     final flex = store.build(config, model: config.models[1]) as OpenAiCompatibleProvider;
     expect(plain.timeout, const Duration(seconds: 120));
     expect(flex.timeout, const Duration(seconds: 900));
+  });
+
+  test('Responses API と background 設定に応じて OpenAiResponsesProvider とタイムアウトが選ばれる', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = await ProviderStore.load();
+    store
+      ..requestTimeout = const Duration(seconds: 120)
+      ..flexTimeout = const Duration(seconds: 900);
+    const bgConfig = ProviderConfig(
+      id: 'sail',
+      label: 'Sail Research',
+      baseUrl: 'https://api.sailresearch.example/v1',
+      api: ProviderApi.responses,
+      background: true,
+      models: [ModelConfig(id: 'sail-large', name: 'sail-large')],
+    );
+    const syncConfig = ProviderConfig(
+      id: 'sync',
+      label: 'Sync',
+      baseUrl: 'https://api.example/v1',
+      api: ProviderApi.responses,
+      background: false,
+      models: [
+        ModelConfig(id: 'std', name: 'std'),
+        ModelConfig(id: 'flex-m', name: 'flex-m', serviceTier: 'flex'),
+      ],
+    );
+
+    final bgProvider = store.build(bgConfig) as OpenAiResponsesProvider;
+    expect(bgProvider.useBackground, isTrue);
+    expect(bgProvider.timeout, const Duration(seconds: 900));
+
+    final syncPlain = store.build(syncConfig, model: syncConfig.models[0]) as OpenAiResponsesProvider;
+    final syncFlex = store.build(syncConfig, model: syncConfig.models[1]) as OpenAiResponsesProvider;
+    expect(syncPlain.useBackground, isFalse);
+    expect(syncPlain.timeout, const Duration(seconds: 120));
+    expect(syncFlex.timeout, const Duration(seconds: 900));
   });
 }

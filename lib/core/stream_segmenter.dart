@@ -36,12 +36,15 @@ enum _Block { text, thinking, toolCall }
 /// Tokens arrive in arbitrary pieces, so a tag can be split across two [feed] calls; the tail
 /// that could still become a tag is held back until the next piece decides it.
 class StreamSegmenter {
+  StreamSegmenter({bool startInThinking = false})
+    : _block = startInThinking ? _Block.thinking : _Block.text;
+
   static const thinkOpen = '<think>';
   static const thinkClose = '</think>';
   static const toolOpen = '<tool_call>';
   static const toolClose = '</tool_call>';
 
-  _Block _block = _Block.text;
+  _Block _block;
   String _pending = '';
   final StringBuffer _toolCall = StringBuffer();
 

@@ -61,6 +61,35 @@ void main() {
       expect(messages[2].text, '後半');
     });
 
+    test('思考の途中で止まったプロンプトは未閉じの thinking を保ち、reasoningContinuationNote を添える', () {
+      final prompt = ChatMlPromptBuilder.build(
+        const [UserTurn('考えて')],
+        const [],
+        null,
+        true,
+        thinkingPrefill: '途中までの思考',
+      );
+      final messages = ChatMlBridge.messages(prompt, native: true);
+      expect(messages[2].role, AiRole.assistant);
+      expect(messages[2].text, '<think>\n途中までの思考');
+      expect(messages[2].reasoning, '途中までの思考');
+      expect(messages[3].role, AiRole.user);
+      expect(messages[3].text, ChatMlBridge.reasoningContinuationNote);
+    });
+
+    test('名前が空または空白だけのツール呼び出しと孤立した tool 応答は関数呼び出しにしない', () {
+      const blankCallPrompt =
+          '<|im_start|>system\nsys<|im_end|>\n'
+          '<|im_start|>user\nhi<|im_end|>\n'
+          '<|im_start|>assistant\n<tool_call>\n{"name": "   ", "arguments": {}}\n</tool_call><|im_end|>\n'
+          '<|im_start|>user\n<tool_response>\norphan\n</tool_response><|im_end|>\n'
+          '<|im_start|>assistant\n';
+      final messages = ChatMlBridge.messages(blankCallPrompt, native: true);
+      expect(messages[2].toolCalls, isEmpty);
+      expect(messages[3].role, AiRole.user);
+      expect(messages[3].text, contains('<tool_response>'));
+    });
+
     test('ブロックが無ければ空になる', () {
       expect(ChatMlBridge.messages('ただの文'), isEmpty);
     });

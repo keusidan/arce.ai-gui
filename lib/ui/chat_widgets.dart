@@ -112,6 +112,10 @@ class MessageView extends StatelessWidget {
     // The reply is plain text over the whole width, like a document: no avatar, no name or role above
     // it and no bubble. Only what the user says sits in a bubble.
     final generating = isLast && state.isGenerating;
+    final hasContent =
+        message.text.isNotEmpty ||
+        message.thinking.isNotEmpty ||
+        message.activities.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -128,7 +132,7 @@ class MessageView extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
             child: SizedBox(width: double.infinity, child: RichReply(text: message.text)),
           ),
-        if (!generating && message.text.isNotEmpty) MessageActions(message: message, isLast: isLast, state: state),
+        if (!generating && hasContent) MessageActions(message: message, isLast: isLast, state: state),
       ],
     );
   }
@@ -512,7 +516,8 @@ class MessageActions extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Wrap(children: [
-        _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, message.text)),
+        if (message.text.isNotEmpty)
+          _MiniAction(label: 'コピー', svg: ArceSvg.copy, onTap: () => copyToClipboard(context, message.text)),
         if (isLast && !state.isGenerating && message.question == null)
           _MiniAction(label: '再試行', svg: ArceSvg.retry, onTap: () => app.chat.regenerate()),
         if (isLast && state.canContinue)

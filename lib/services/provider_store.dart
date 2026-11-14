@@ -11,6 +11,7 @@ import '../ai/model_info.dart';
 import '../ai/openai_compatible.dart';
 import '../ai/provider.dart';
 import '../ai/provider_config.dart';
+import '../ai/responses_provider.dart';
 
 /// The providers the user added, which one is in use, and their keys.
 ///
@@ -327,6 +328,38 @@ class ProviderStore extends ChangeNotifier {
     http.Client? client,
   }) {
     final chosen = model ?? config.defaultModel;
+    final effectiveTimeout =
+        (chosen?.isFlex ?? false) ||
+                (config.api == ProviderApi.responses && config.background)
+            ? flexTimeout
+            : requestTimeout;
+    final resolvedClient = client ?? clientFactory?.call();
+    void handleCacheRefused(String reason) {
+      unawaited(setPromptCache(config.id, false));
+      onNotice?.call('${config.label}: $reason');
+    }
+
+    if (config.api == ProviderApi.responses) {
+      return OpenAiResponsesProvider(
+        id: config.id,
+        label: config.label,
+        baseUrl: config.baseUrl,
+        model: chosen?.id ?? '',
+        modelConfig: chosen,
+        apiKey: keyOf(config.id),
+        headers: config.headers,
+        body: config.body,
+        supportsTools: config.supportsTools,
+        promptCache: config.promptCache,
+        promptCacheField: config.promptCacheField,
+        // the server refused the cache field: the switch goes off, and the user is told why
+        onCacheRefused: handleCacheRefused,
+        client: resolvedClient,
+        timeout: effectiveTimeout,
+        useBackground: config.background,
+      );
+    }
+
     return OpenAiCompatibleProvider(
       id: config.id,
       label: config.label,
@@ -340,12 +373,9 @@ class ProviderStore extends ChangeNotifier {
       promptCache: config.promptCache,
       promptCacheField: config.promptCacheField,
       // the server refused the cache field: the switch goes off, and the user is told why
-      onCacheRefused: (reason) {
-        unawaited(setPromptCache(config.id, false));
-        onNotice?.call('${config.label}: $reason');
-      },
-      client: client ?? clientFactory?.call(),
-      timeout: (chosen?.isFlex ?? false) ? flexTimeout : requestTimeout,
+      onCacheRefused: handleCacheRefused,
+      client: resolvedClient,
+      timeout: effectiveTimeout,
     );
   }
 

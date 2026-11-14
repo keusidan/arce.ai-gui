@@ -692,4 +692,166 @@ void main() {
       expect(messages.single.containsKey('reasoning_content'), isFalse);
     });
   });
+
+  group('HTTP 429 詳細と互換フォールバック', () {
+    test('HTTP 429 のとき error.message の詳細を失敗メッセージに含める', () async {
+      final provider = providerWith(
+        const [],
+        status: 429,
+        errorBody: jsonEncode({
+          'error': {'message': 'Tokens per minute limit reached'},
+        }),
+      );
+      await expectLater(
+        () => provider.stream(request).toList(),
+        throwsA(
+          isA<AiProviderException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('HTTP 429'), contains('Tokens per minute limit reached')),
+          ),
+        ),
+      );
+    });
+
+    test('extra_content を拒否されたら除いて再送し、次回から最初から外す（Issue #4）', () async {
+      final bodies = <Map<String, Object?>>[];
+      var attempts = 0;
+      final client = MockClient.streaming((req, bodyStream) async {
+        final decoded = jsonDecode(utf8.decode(await bodyStream.expand((b) => b).toList())) as Map<String, Object?>;
+        bodies.add(decoded);
+        attempts++;
+        if (attempts == 1) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(jsonEncode({
+              'error': {'message': 'messages.1.assistant.tool_calls.0.extra_content: property is unsupported'},
+            }))),
+            400,
+            request: req,
+          );
+        }
+        return http.StreamedResponse(
+          Stream.fromIterable([utf8.encode(textEvent('ok')), utf8.encode('data: [DONE]\n\n')]),
+          200,
+          headers: const {'content-type': 'text/event-stream'},
+          request: req,
+        );
+      });
+      final provider = OpenAiCompatibleProvider(
+        id: 't',
+        label: 't',
+        baseUrl: 'https://api.example/v1',
+        model: 'm',
+        client: client,
+      );
+      const reqWithExtra = AiRequest(messages: [
+        AiMessage(AiRole.user, text: 'hi'),
+        AiMessage(AiRole.assistant, toolCalls: [
+          ToolCallDelta(id: 'c1', name: 'get_time', argumentsJson: '{}', extraContent: {'google': {'thought_signature': 'sig'}}),
+        ]),
+        AiMessage(AiRole.tool, text: '12:00', toolCallId: 'c1'),
+      ]);
+      final deltas = await provider.stream(reqWithExtra).toList();
+      expect(deltas.whereType<TextDelta>().single.text, 'ok');
+      expect(bodies, hasLength(2));
+      expect((((bodies[0]['messages'] as List)[1] as Map)['tool_calls'] as List).single, contains('extra_content'));
+      expect((((bodies[1]['messages'] as List)[1] as Map)['tool_calls'] as List).single, isNot(contains('extra_content')));
+
+      await provider.stream(reqWithExtra).toList();
+      expect(bodies, hasLength(3));
+      expect((((bodies[2]['messages'] as List)[1] as Map)['tool_calls'] as List).single, isNot(contains('extra_content')));
+    });
+
+    test('署名なしの過去ツール呼び出しで thought_signature 不足なら該当ターンのみテキスト化して再送する（Issue #3）', () async {
+      final bodies = <Map<String, Object?>>[];
+      var attempts = 0;
+      final client = MockClient.streaming((req, bodyStream) async {
+        final decoded = jsonDecode(utf8.decode(await bodyStream.expand((b) => b).toList())) as Map<String, Object?>;
+        bodies.add(decoded);
+        attempts++;
+        if (attempts == 1) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(jsonEncode({
+              'error': {'message': 'Function call is missing a thought_signature in functionCall parts'},
+            }))),
+            400,
+            request: req,
+          );
+        }
+        return http.StreamedResponse(
+          Stream.fromIterable([utf8.encode(textEvent('ok')), utf8.encode('data: [DONE]\n\n')]),
+          200,
+          headers: const {'content-type': 'text/event-stream'},
+          request: req,
+        );
+      });
+      final provider = OpenAiCompatibleProvider(
+        id: 't',
+        label: 't',
+        baseUrl: 'https://api.example/v1',
+        model: 'gemini-3-flash',
+        client: client,
+      );
+      await provider.stream(const AiRequest(messages: [
+        AiMessage(AiRole.user, text: 'old'),
+        AiMessage(AiRole.assistant, toolCalls: [
+          ToolCallDelta(id: 'c1', name: 'get_time', argumentsJson: '{}'),
+        ]),
+        AiMessage(AiRole.tool, text: '12:00', toolCallId: 'c1'),
+        AiMessage(AiRole.assistant, toolCalls: [
+          ToolCallDelta(id: 'c2', name: 'get_time', argumentsJson: '{}', extraContent: {'google': {'thought_signature': 'sig2'}}),
+        ]),
+        AiMessage(AiRole.tool, text: '12:01', toolCallId: 'c2'),
+      ])).toList();
+
+      expect(bodies, hasLength(2));
+      final retried = (bodies[1]['messages'] as List).cast<Map>();
+      expect(retried[1]['tool_calls'], isNull, reason: 'unsigned tool call became plain text');
+      expect(retried[1]['content'], contains('<tool_call>'));
+      expect(retried[2]['role'], 'user');
+      expect(retried[3]['tool_calls'], isNotNull, reason: 'signed Gemini tool call stays native');
+      expect(retried[4]['role'], 'tool');
+    });
+
+    test('function_response エラー（空名など）が返ったら全ツール履歴をテキスト化して再送する（Issue #5）', () async {
+      final bodies = <Map<String, Object?>>[];
+      var attempts = 0;
+      final client = MockClient.streaming((req, bodyStream) async {
+        final decoded = jsonDecode(utf8.decode(await bodyStream.expand((b) => b).toList())) as Map<String, Object?>;
+        bodies.add(decoded);
+        attempts++;
+        if (attempts == 1) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(jsonEncode({
+              'error': {'message': '* GenerateContentRequest.contents[255].parts[0].function_response.name: Name cannot be empty.'},
+            }))),
+            400,
+            request: req,
+          );
+        }
+        return http.StreamedResponse(
+          Stream.fromIterable([utf8.encode(textEvent('recovered')), utf8.encode('data: [DONE]\n\n')]),
+          200,
+          headers: const {'content-type': 'text/event-stream'},
+          request: req,
+        );
+      });
+      final provider = OpenAiCompatibleProvider(
+        id: 't',
+        label: 't',
+        baseUrl: 'https://api.example/v1',
+        model: 'gemini-3-flash',
+        client: client,
+      );
+      final deltas = await provider.stream(const AiRequest(messages: [
+        AiMessage(AiRole.user, text: 'hi'),
+        AiMessage(AiRole.tool, text: 'orphan output', toolCallId: ''),
+      ])).toList();
+      expect(deltas.whereType<TextDelta>().single.text, 'recovered');
+      expect(bodies, hasLength(2));
+      final retried = (bodies[1]['messages'] as List).cast<Map>();
+      expect(retried[1]['role'], 'user');
+      expect(retried[1]['content'], contains('<tool_response>'));
+    });
+  });
 }

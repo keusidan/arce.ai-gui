@@ -92,6 +92,7 @@ abstract final class ProviderImport {
     }
 
     var baseUrl = text(['baseUrl', 'base_url', 'url', 'endpoint', 'baseURL']);
+    var inferredResponses = false;
     if (type == 'cloudflare') {
       final account = text(['account_id', 'accountId', 'account']);
       if (!CloudflareGateway.isAccountId(account)) throw FormatException('$n 番目の Cloudflare には account_id（英数字）が要ります');
@@ -100,8 +101,12 @@ abstract final class ProviderImport {
       headers
         ..clear()
         ..addAll(withGateway);
+    } else {
+      inferredResponses = RegExp(r'/responses/?$').hasMatch(baseUrl);
     }
-    baseUrl = baseUrl.replaceAll(RegExp(r'/chat/completions/?$'), '').replaceAll(RegExp(r'/+$'), '');
+    baseUrl = baseUrl
+        .replaceAll(RegExp(r'/(?:chat/completions|responses)/?$'), '')
+        .replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.tryParse(baseUrl);
     if (baseUrl.isEmpty || uri == null || !(uri.isScheme('https') || uri.isScheme('http')) || uri.host.isEmpty) {
       throw FormatException('$n 番目の baseUrl（https://…）が読めません');
@@ -130,6 +135,14 @@ abstract final class ProviderImport {
       return null;
     }
 
+    final rawApi = text(['api', 'protocol']).toLowerCase();
+    final api = switch (rawApi) {
+      'responses' => 'responses',
+      'chatcompletions' || 'chat_completions' || 'chat' => 'chatCompletions',
+      '' => inferredResponses ? 'responses' : null,
+      _ => null,
+    };
+
     final config = ProviderConfig.fromJson({
       'id': 'imported',
       'label': text(['label', 'name']),
@@ -142,6 +155,8 @@ abstract final class ProviderImport {
       if (flag(['autoFetch', 'autoFetchModels']) == false || type == 'cloudflare') 'autoFetch': false,
       if (flag(['promptCache']) == true) 'promptCache': true,
       if (json['promptCacheField'] is String) 'promptCacheField': json['promptCacheField'],
+      'api': ?api,
+      if (flag(['background', 'responsesBackground']) == true) 'background': true,
     });
     return ImportedProvider(config, key: key.isEmpty ? null : key);
   }

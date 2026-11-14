@@ -74,7 +74,21 @@ class OpenAiCompatibleProvider implements AiProvider {
   /// The server refused the cache field: it is left out from then on, for this provider object.
   bool _cacheRefused = false;
 
+  /// The server rejected `extra_content` on historical tool calls (e.g., Cerebras rejecting
+  /// signature metadata from another provider); omitted from subsequent requests on this instance.
+  bool _extraContentRefused = false;
+
   final http.Client _client;
+
+  http.Client get httpClient => _client;
+  Uri endpointUri(String path) => _uri(path);
+  Map<String, String> get requestHeaders => _requestHeaders;
+  bool sendsCache(AiRequest request) => _sendsCache(request);
+  bool get cacheRefused => _cacheRefused;
+  void markCacheRefused() => _cacheRefused = true;
+  bool get extraContentRefused => _extraContentRefused;
+  String failureMessage(int status, String body) => _failure(status, body);
+  static int? parseInt(Object? value) => _int(value);
 
   @override
   ProviderCapabilities get capabilities =>
@@ -97,42 +111,85 @@ class OpenAiCompatibleProvider implements AiProvider {
 
   @override
   Stream<Delta> stream(AiRequest request) async* {
+    var effectiveRequest = request;
+    var withCache = true;
+    var withExtraContent = !_extraContentRefused;
+    var strippedUnsignedTools = false;
+    var strippedAllTools = false;
+
     http.StreamedResponse response;
     try {
-      response = await _send(request, withCache: true);
+      response = await _send(
+        effectiveRequest,
+        withCache: withCache,
+        withExtraContent: withExtraContent,
+      );
     } on http.RequestAbortedException {
       yield const StopDelta(FinishReason.cancelled);
       return;
     }
-    if (response.statusCode < 200 || response.statusCode > 299) {
-      var failed = response;
-      var text = await response.stream.bytesToString();
-      // The server does not know the cache field and says so: the request goes again without it, once,
-      // and the app is told so that it can turn the switch off and say why.
+
+    while (response.statusCode < 200 || response.statusCode > 299) {
+      final text = await response.stream.bytesToString();
+      final isBadRequest =
+          response.statusCode == 400 || response.statusCode == 422;
+      final lower = text.toLowerCase();
       final field = promptCacheField;
-      if ((response.statusCode == 400 || response.statusCode == 422) &&
-          _sendsCache(request) &&
-          text.toLowerCase().contains(field.toLowerCase())) {
+
+      if (isBadRequest &&
+          withCache &&
+          _sendsCache(effectiveRequest) &&
+          lower.contains(field.toLowerCase())) {
+        // The server does not know the cache field and says so: retry once without it and inform the app.
         _cacheRefused = true;
+        withCache = false;
         onCacheRefused?.call(
           'このプロバイダは、キャッシュ用の項目「$field」を受け付けませんでした（HTTP ${response.statusCode}）。'
           'キャッシュの送信をオフにして、もう一度送りました',
         );
-        try {
-          failed = await _send(request, withCache: false);
-        } on http.RequestAbortedException {
-          yield const StopDelta(FinishReason.cancelled);
-          return;
-        }
-        if (failed.statusCode >= 200 && failed.statusCode <= 299) {
-          response = failed;
-          text = '';
-        } else {
-          text = await failed.stream.bytesToString();
-        }
+      } else if (isBadRequest &&
+          withExtraContent &&
+          _hasExtraContent(effectiveRequest.messages) &&
+          lower.contains('extra_content')) {
+        // Another provider's tool_call signature metadata (extra_content) is rejected by this endpoint.
+        _extraContentRefused = true;
+        withExtraContent = false;
+      } else if (isBadRequest &&
+          !strippedUnsignedTools &&
+          _hasUnsignedToolCalls(effectiveRequest.messages) &&
+          lower.contains('thought_signature')) {
+        // Historical tool calls created without a signature are converted to text so Gemini accepts the turn.
+        strippedUnsignedTools = true;
+        effectiveRequest = _copyWithMessages(
+          effectiveRequest,
+          _withoutToolCalls(effectiveRequest.messages, onlyUnsigned: true),
+        );
+      } else if (isBadRequest &&
+          !strippedAllTools &&
+          _hasToolMessages(effectiveRequest.messages) &&
+          lower.contains('function_response')) {
+        strippedAllTools = true;
+        effectiveRequest = _copyWithMessages(
+          effectiveRequest,
+          _withoutToolCalls(effectiveRequest.messages, onlyUnsigned: false),
+        );
+      } else {
+        throw AiProviderException(
+          _failure(response.statusCode, text),
+          statusCode: response.statusCode,
+          body: text,
+        );
       }
-      if (failed.statusCode < 200 || failed.statusCode > 299) {
-        throw AiProviderException(_failure(failed.statusCode, text), statusCode: failed.statusCode, body: text);
+
+      try {
+        response = await _send(
+          effectiveRequest,
+          withCache: withCache,
+          withExtraContent: withExtraContent,
+        );
+      } on http.RequestAbortedException {
+        yield const StopDelta(FinishReason.cancelled);
+        return;
       }
     }
 
@@ -236,17 +293,18 @@ class OpenAiCompatibleProvider implements AiProvider {
       ..sort((a, b) => calls[a]!.wireIndex != calls[b]!.wireIndex ? calls[a]!.wireIndex.compareTo(calls[b]!.wireIndex) : a.compareTo(b));
     for (final index in order) {
       final call = calls[index]!;
-      if (call.name.isEmpty) continue;
+      final name = call.name.trim();
+      if (name.isEmpty) continue;
       final arguments = call.arguments.isEmpty ? '{}' : call.arguments.toString();
       // several calls of one name that arrived as one (no ids to tell them apart): `{...}{...}`
       final objects = splitObjects(arguments);
       if (objects.length > 1) {
         for (var n = 0; n < objects.length; n++) {
-          yield ToolCallDelta(id: call.id.isEmpty ? '' : '${call.id}_$n', name: call.name, argumentsJson: objects[n], extraContent: n == 0 ? call.extraContent : null);
+          yield ToolCallDelta(id: call.id.isEmpty ? '' : '${call.id}_$n', name: name, argumentsJson: objects[n], extraContent: n == 0 ? call.extraContent : null);
         }
         continue;
       }
-      yield ToolCallDelta(id: call.id, name: call.name, argumentsJson: arguments, extraContent: call.extraContent);
+      yield ToolCallDelta(id: call.id, name: name, argumentsJson: arguments, extraContent: call.extraContent);
     }
     yield StopDelta(finish);
   }
@@ -265,10 +323,14 @@ class OpenAiCompatibleProvider implements AiProvider {
 
   /// One request to the server. An abortable request: when the user stops, the connection is closed and
   /// the wait for the next word ends (cancelling a stream that is waiting cannot do that).
-  Future<http.StreamedResponse> _send(AiRequest request, {required bool withCache}) {
+  Future<http.StreamedResponse> _send(
+    AiRequest request, {
+    required bool withCache,
+    bool withExtraContent = true,
+  }) {
     final message = http.AbortableRequest('POST', _uri('chat/completions'), abortTrigger: request.abort)
       ..headers.addAll(_requestHeaders)
-      ..body = jsonEncode(_body(request, withCache: withCache));
+      ..body = jsonEncode(_body(request, withCache: withCache, withExtraContent: withExtraContent));
     return _client.send(message).timeout(timeout);
   }
 
@@ -283,9 +345,16 @@ class OpenAiCompatibleProvider implements AiProvider {
       !body.containsKey(promptCacheField) &&
       !request.extraBody.containsKey(promptCacheField);
 
-  Map<String, Object?> _body(AiRequest request, {bool withCache = true}) => {
+  Map<String, Object?> _body(
+    AiRequest request, {
+    bool withCache = true,
+    bool withExtraContent = true,
+  }) => {
     'model': request.model.trim().isEmpty ? model : request.model,
-    'messages': [for (final message in request.messages) _message(message)],
+    'messages': [
+      for (final message in request.messages)
+        _message(message, withExtraContent: withExtraContent),
+    ],
     'stream': true,
     'stream_options': {'include_usage': true},
     'max_tokens': request.maxTokens,
@@ -314,7 +383,83 @@ class OpenAiCompatibleProvider implements AiProvider {
     ...body,
   };
 
-  static Map<String, Object?> _message(AiMessage message) {
+  static bool _hasExtraContent(List<AiMessage> messages) =>
+      messages.any((m) => m.toolCalls.any((c) => c.extraContent != null));
+
+  static bool _hasUnsignedToolCalls(List<AiMessage> messages) =>
+      messages.any((m) => m.toolCalls.any((c) => c.extraContent == null));
+
+  static bool _hasToolMessages(List<AiMessage> messages) =>
+      messages.any((m) => m.role == AiRole.tool || m.toolCalls.isNotEmpty);
+
+  static AiRequest _copyWithMessages(AiRequest request, List<AiMessage> messages) =>
+      AiRequest(
+        messages: messages,
+        model: request.model,
+        tools: request.tools,
+        maxTokens: request.maxTokens,
+        temperature: request.temperature,
+        topP: request.topP,
+        extraBody: request.extraBody,
+        abort: request.abort,
+        cacheKey: request.cacheKey,
+      );
+
+  static List<AiMessage> _withoutToolCalls(
+    List<AiMessage> messages, {
+    required bool onlyUnsigned,
+  }) {
+    final out = <AiMessage>[];
+    final convertedIds = <String>{};
+    for (final message in messages) {
+      if (message.role == AiRole.assistant && message.toolCalls.isNotEmpty) {
+        final convertAll = !onlyUnsigned ||
+            message.toolCalls.any(
+              (c) => c.extraContent == null || c.name.trim().isEmpty,
+            );
+        if (!convertAll) {
+          out.add(message);
+          continue;
+        }
+        for (final call in message.toolCalls) {
+          if (call.id.isNotEmpty) convertedIds.add(call.id);
+        }
+        final text = [
+          if (message.text.trim().isNotEmpty) message.text.trim(),
+          for (final call in message.toolCalls)
+            '<tool_call>{"name": ${jsonEncode(call.name)}, "arguments": ${call.argumentsJson}}</tool_call>',
+        ].join('\n');
+        out.add(
+          AiMessage(
+            AiRole.assistant,
+            text: text,
+            reasoning: message.reasoning,
+          ),
+        );
+      } else if (message.role == AiRole.tool) {
+        if (!onlyUnsigned ||
+            message.toolCallId.trim().isEmpty ||
+            convertedIds.contains(message.toolCallId)) {
+          out.add(
+            AiMessage(
+              AiRole.user,
+              text: '<tool_response>\n${message.text}\n</tool_response>',
+            ),
+          );
+        } else {
+          out.add(message);
+        }
+      } else {
+        out.add(message);
+      }
+    }
+    return out;
+  }
+
+  static Map<String, Object?> _message(
+    AiMessage message, {
+    bool withExtraContent = true,
+  }) {
     switch (message.role) {
       case AiRole.tool:
         return {
@@ -355,7 +500,8 @@ class OpenAiCompatibleProvider implements AiProvider {
                   'name': call.name,
                   'arguments': call.argumentsJson,
                 },
-                'extra_content': ?call.extraContent,
+                if (withExtraContent && call.extraContent != null)
+                  'extra_content': call.extraContent,
               },
           ],
         };
@@ -441,7 +587,7 @@ class OpenAiCompatibleProvider implements AiProvider {
     return switch (status) {
       401 || 403 => 'APIキーが受け付けられませんでした（HTTP $status）$detail',
       404 => '接続先が見つかりません（HTTP 404）。URL とモデル名を確認してください$detail',
-      429 => '回数制限に達しました（HTTP 429）。少し待ってからやり直してください',
+      429 => '回数制限に達しました（HTTP 429）。少し待ってからやり直してください$detail',
       _ => 'プロバイダが失敗しました（HTTP $status）$detail',
     };
   }

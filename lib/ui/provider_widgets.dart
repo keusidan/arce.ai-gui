@@ -10,6 +10,7 @@ import '../ai/openai_compatible.dart';
 import '../ai/provider.dart';
 import '../ai/provider_config.dart';
 import '../ai/provider_import.dart';
+import '../ai/responses_provider.dart';
 import '../ai/thinking_config.dart';
 import '../services/app_controller.dart';
 import '../services/provider_store.dart';
@@ -386,6 +387,8 @@ class _ProviderEditorState extends State<_ProviderEditor> {
   late bool _tools = widget.existing?.supportsTools ?? true;
   late bool _autoFetch = widget.existing?.autoFetchModels ?? true;
   late bool _promptCache = widget.existing?.promptCache ?? false;
+  late ProviderApi _api = widget.existing?.api ?? ProviderApi.chatCompletions;
+  late bool _background = widget.existing?.background ?? false;
   late final TextEditingController _cacheField = TextEditingController(
     text: widget.existing?.promptCacheField ?? ProviderConfig.defaultPromptCacheField,
   );
@@ -422,6 +425,8 @@ class _ProviderEditorState extends State<_ProviderEditor> {
       autoFetchModels: _cloudflare ? false : _autoFetch,
       promptCache: _promptCache,
       promptCacheField: _cacheField.text.trim().isEmpty ? ProviderConfig.defaultPromptCacheField : _cacheField.text.trim(),
+      api: _cloudflare ? ProviderApi.chatCompletions : _api,
+      background: _cloudflare || _api != ProviderApi.responses ? false : _background,
     );
   }
 
@@ -456,19 +461,34 @@ class _ProviderEditorState extends State<_ProviderEditor> {
       _busy = true;
       _result = '接続を確認しています…';
     });
-    final provider = OpenAiCompatibleProvider(
-      id: config.id,
-      label: config.label,
-      baseUrl: config.baseUrl,
-      model: model?.id ?? '',
-      modelConfig: model,
-      apiKey: _key.text.trim(),
-      headers: config.headers,
-      body: config.body,
-      supportsTools: config.supportsTools,
-      promptCache: config.promptCache,
-      promptCacheField: config.promptCacheField,
-    );
+    final provider = (!_cloudflare && _api == ProviderApi.responses)
+        ? OpenAiResponsesProvider(
+            id: config.id,
+            label: config.label,
+            baseUrl: config.baseUrl,
+            model: model?.id ?? '',
+            modelConfig: model,
+            apiKey: _key.text.trim(),
+            headers: config.headers,
+            body: config.body,
+            supportsTools: config.supportsTools,
+            promptCache: config.promptCache,
+            promptCacheField: config.promptCacheField,
+            useBackground: config.background,
+          )
+        : OpenAiCompatibleProvider(
+            id: config.id,
+            label: config.label,
+            baseUrl: config.baseUrl,
+            model: model?.id ?? '',
+            modelConfig: model,
+            apiKey: _key.text.trim(),
+            headers: config.headers,
+            body: config.body,
+            supportsTools: config.supportsTools,
+            promptCache: config.promptCache,
+            promptCacheField: config.promptCacheField,
+          );
     try {
       await provider.verify();
       if (!mounted) return;
@@ -511,6 +531,8 @@ class _ProviderEditorState extends State<_ProviderEditor> {
           autoFetchModels: config.autoFetchModels,
           promptCache: config.promptCache,
           promptCacheField: config.promptCacheField,
+          api: config.api,
+          background: config.background,
         );
       }
       await widget.store.save(config);
@@ -644,6 +666,47 @@ class _ProviderEditorState extends State<_ProviderEditor> {
               _field('Base URL', _baseUrl, 'https://api.openai.com/v1'),
               ListenableBuilder(listenable: _baseUrl, builder: (context, _) => ClearTextWarning(url: _baseUrl.text, what: 'APIキー')),
               _field('APIキー', _key, 'sk-…（端末の安全な領域に保存します）', obscure: true),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text('通信方式', style: ts(context, 10, color: c.muted)),
+              ),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  ChoiceChip(
+                    key: const ValueKey('provider-api-chat'),
+                    label: Text('Chat Completions', style: ts(context, 11)),
+                    selected: _api == ProviderApi.chatCompletions,
+                    onSelected: (_) => setState(() {
+                      _api = ProviderApi.chatCompletions;
+                      _background = false;
+                    }),
+                  ),
+                  ChoiceChip(
+                    key: const ValueKey('provider-api-responses'),
+                    label: Text('Responses (/responses)', style: ts(context, 11)),
+                    selected: _api == ProviderApi.responses,
+                    onSelected: (_) => setState(() => _api = ProviderApi.responses),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              if (_api == ProviderApi.responses)
+                SwitchListTile(
+                  key: const ValueKey('provider-responses-background'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  value: _background,
+                  onChanged: (value) => setState(() => _background = value),
+                  title: Text('バックグラウンド処理（background: true）', style: ts(context, 12)),
+                  subtitle: Text(
+                    'オンにすると、Responses API で background: true を送り、GET /responses/{id} をポーリングして応答を待ちます。'
+                    'モデルのサービス階層を「flex」にすると metadata.completion_window: flex と background: true で送ります。'
+                    '非対応の接続先や Chat Completions では別の形式へ自動切り替えはせず、エラーをそのまま表示します',
+                    style: ts(context, 9.5, color: c.muted, height: 1.5),
+                  ),
+                ),
             ],
             SwitchListTile(
               contentPadding: EdgeInsets.zero,

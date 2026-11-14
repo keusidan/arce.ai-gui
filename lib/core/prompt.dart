@@ -81,12 +81,14 @@ Rules:
 
   /// [assistantPrefill] is the answer so far when continuing a reply that stopped early
   /// (the "続行" action): the model picks up exactly where the text ends.
+  /// [thinkingPrefill] resumes an unfinished `<think>` block when the reply stopped during reasoning.
   static String build(
     List<ChatMessage> history,
     List<ToolDefinition> tools,
     String? tone,
     bool thinking, {
     String assistantPrefill = '',
+    String thinkingPrefill = '',
     // Agent role, reply-length limit and similar app-side rules; never user-editable.
     List<String> extraInstructions = const [],
   }) {
@@ -128,9 +130,23 @@ Rules:
       ..write(_imStart)
       ..write('assistant\n');
     // Qwen3's own template disables reasoning by pre-filling an empty think block.
-    // A continuation also skips reasoning: the plan was already made in the first part.
-    if (!thinking || assistantPrefill.isNotEmpty) b.write('<think>\n\n</think>\n\n');
-    b.write(assistantPrefill);
+    // A continuation with partial answer also skips reasoning; an unfinished thinking block resumes inside <think>.
+    if (thinkingPrefill.isNotEmpty) {
+      if (assistantPrefill.isNotEmpty) {
+        b
+          ..write('<think>\n')
+          ..write(thinkingPrefill)
+          ..write('\n</think>\n\n')
+          ..write(assistantPrefill);
+      } else {
+        b
+          ..write('<think>\n')
+          ..write(thinkingPrefill);
+      }
+    } else {
+      if (!thinking || assistantPrefill.isNotEmpty) b.write('<think>\n\n</think>\n\n');
+      b.write(assistantPrefill);
+    }
     return b.toString();
   }
 

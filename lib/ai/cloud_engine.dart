@@ -1,5 +1,6 @@
 import '../core/engine.dart';
 import '../core/generation.dart';
+import '../core/stream_segmenter.dart';
 import 'chatml_bridge.dart';
 import 'fallback.dart';
 import 'model_hints.dart';
@@ -137,10 +138,22 @@ class CloudEngine implements InferenceEngine {
     );
   }
 
+  static bool _isOpenThinkingContinuation(String prompt) {
+    const marker = '<|im_start|>assistant\n';
+    final lastStart = prompt.lastIndexOf(marker);
+    if (lastStart < 0) return false;
+    final tail = prompt.substring(lastStart + marker.length);
+    if (tail.contains('<|im_end|>')) return false;
+    return tail.contains(StreamSegmenter.thinkOpen) &&
+        !tail.contains(StreamSegmenter.thinkClose);
+  }
+
   @override
   Stream<GenerationEvent> generate(GenerateRequest request) async* {
     _cancelled = false;
-    final adapter = CloudEventAdapter();
+    final adapter = CloudEventAdapter(
+      startInThinking: _isOpenThinkingContinuation(request.prompt),
+    );
     // fail before anything is sent when there is nothing to send, or when it cannot fit
     final first = _requestFor(provider, request);
     if (tokenPrecheck) {

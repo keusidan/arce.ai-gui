@@ -30,6 +30,12 @@ abstract final class ChatMlBridge {
       'Continue the answer above from exactly where it stops. '
       'Do not repeat what is already written and do not start over.';
 
+  /// Sent when the previous reply stopped while still inside `<think>` before any answer text
+  /// was written: preserves the partial reasoning and asks the model to continue to its answer.
+  static const reasoningContinuationNote =
+      'Continue from your reasoning above and finish your answer. Do not '
+      'repeat what you already reasoned and do not start over.';
+
   /// The messages of [prompt]. The reply block at the end is usually empty (it only means
   /// "answer now") and is dropped; a non-empty one is a continuation.
   ///
@@ -69,11 +75,72 @@ abstract final class ChatMlBridge {
 
       // The reply that is about to be written has no closing tag yet.
       if (close < 0) {
-        final partial = _cleanAnswer(text);
-        if (role == 'assistant' && partial.isNotEmpty) {
-          out
-            ..add(AiMessage(AiRole.assistant, text: partial))
-            ..add(const AiMessage(AiRole.user, text: continuationNote));
+        if (role == 'assistant') {
+          final trimmed = text.trimLeft();
+          if (trimmed.startsWith(StreamSegmenter.thinkOpen)) {
+            final closeAt = trimmed.indexOf(StreamSegmenter.thinkClose);
+            if (closeAt < 0) {
+              final thought = trimmed
+                  .substring(StreamSegmenter.thinkOpen.length)
+                  .trim();
+              if (thought.isNotEmpty) {
+                out
+                  ..add(
+                    AiMessage(
+                      AiRole.assistant,
+                      text: '${StreamSegmenter.thinkOpen}\n$thought',
+                      reasoning: thought,
+                    ),
+                  )
+                  ..add(
+                    const AiMessage(
+                      AiRole.user,
+                      text: reasoningContinuationNote,
+                    ),
+                  );
+              }
+            } else {
+              final thought = trimmed
+                  .substring(StreamSegmenter.thinkOpen.length, closeAt)
+                  .trim();
+              final answer = _cleanAnswer(
+                trimmed.substring(closeAt + StreamSegmenter.thinkClose.length),
+              );
+              if (answer.isNotEmpty) {
+                out
+                  ..add(
+                    AiMessage(
+                      AiRole.assistant,
+                      text: answer,
+                      reasoning: thought,
+                    ),
+                  )
+                  ..add(const AiMessage(AiRole.user, text: continuationNote));
+              } else if (thought.isNotEmpty) {
+                out
+                  ..add(
+                    AiMessage(
+                      AiRole.assistant,
+                      text: '${StreamSegmenter.thinkOpen}\n$thought',
+                      reasoning: thought,
+                    ),
+                  )
+                  ..add(
+                    const AiMessage(
+                      AiRole.user,
+                      text: reasoningContinuationNote,
+                    ),
+                  );
+              }
+            }
+          } else {
+            final partial = _cleanAnswer(text);
+            if (partial.isNotEmpty) {
+              out
+                ..add(AiMessage(AiRole.assistant, text: partial))
+                ..add(const AiMessage(AiRole.user, text: continuationNote));
+            }
+          }
         }
         break;
       }
@@ -122,14 +189,16 @@ abstract final class ChatMlBridge {
     if (match == null) return null;
     try {
       final decoded = jsonDecode(match.group(1)!);
-      if (decoded is! Map || decoded['name'] is! String) return null;
+      if (decoded is! Map) return null;
+      final name = decoded['name'];
+      if (name is! String || name.trim().isEmpty) return null;
       final arguments = decoded['arguments'];
       final extra = decoded['extra_content'];
       return (
         text.substring(0, match.start).trim(),
         ToolCallDelta(
           id: id,
-          name: decoded['name'] as String,
+          name: name.trim(),
           argumentsJson: jsonEncode(arguments is Map ? arguments : const {}),
           extraContent: extra is Map ? Map<String, Object?>.from(extra) : null,
         ),
@@ -143,23 +212,68 @@ abstract final class ChatMlBridge {
   static String? _toolResponse(String text) => _toolResponseOnly.firstMatch(text)?.group(1);
 
   /// A provider refuses an assistant `tool_calls` that no `tool` message follows (a conversation
-  /// that was stopped before the call ran). Such a call goes back to being plain text.
+  /// that was stopped before the call ran), empty tool names, or orphaned `tool` responses.
+  /// Unpaired calls or orphaned responses fall back to plain text.
   static List<AiMessage> _closeOpenCalls(List<AiMessage> messages) {
-    return [
-      for (var i = 0; i < messages.length; i++)
-        if (messages[i].toolCalls.isNotEmpty && (i + 1 >= messages.length || messages[i + 1].role != AiRole.tool))
-          AiMessage(
-            AiRole.assistant,
-            text: [
-              messages[i].text,
-              for (final call in messages[i].toolCalls)
-                '${StreamSegmenter.toolOpen}{"name": ${jsonEncode(call.name)}, "arguments": ${call.argumentsJson}}${StreamSegmenter.toolClose}',
-            ].where((s) => s.isNotEmpty).join('\n'),
-            reasoning: messages[i].reasoning,
-          )
-        else
-          messages[i],
-    ];
+    final out = <AiMessage>[];
+    var activeCallIds = <String>{};
+    for (var i = 0; i < messages.length; i++) {
+      final msg = messages[i];
+      if (msg.role == AiRole.assistant && msg.toolCalls.isNotEmpty) {
+        final validCalls = [
+          for (final call in msg.toolCalls)
+            if (call.name.trim().isNotEmpty) call,
+        ];
+        final hasNextTool =
+            i + 1 < messages.length && messages[i + 1].role == AiRole.tool;
+        if (validCalls.isEmpty || !hasNextTool) {
+          out.add(
+            AiMessage(
+              AiRole.assistant,
+              text: [
+                msg.text,
+                for (final call in msg.toolCalls)
+                  if (call.name.trim().isNotEmpty)
+                    '${StreamSegmenter.toolOpen}{"name": ${jsonEncode(call.name.trim())}, "arguments": ${call.argumentsJson}}${StreamSegmenter.toolClose}',
+              ].where((s) => s.isNotEmpty).join('\n'),
+              reasoning: msg.reasoning,
+            ),
+          );
+          activeCallIds = <String>{};
+        } else {
+          out.add(
+            validCalls.length == msg.toolCalls.length
+                ? msg
+                : AiMessage(
+                    AiRole.assistant,
+                    text: msg.text,
+                    toolCalls: validCalls,
+                    reasoning: msg.reasoning,
+                  ),
+          );
+          activeCallIds = {
+            for (final call in validCalls)
+              if (call.id.trim().isNotEmpty) call.id,
+          };
+        }
+      } else if (msg.role == AiRole.tool) {
+        if (msg.toolCallId.trim().isNotEmpty &&
+            activeCallIds.remove(msg.toolCallId)) {
+          out.add(msg);
+        } else {
+          out.add(
+            AiMessage(
+              AiRole.user,
+              text: '<tool_response>\n${msg.text}\n</tool_response>',
+            ),
+          );
+        }
+      } else {
+        activeCallIds = <String>{};
+        out.add(msg);
+      }
+    }
+    return out;
   }
 
   static AiMessage _user(String text, Map<String, ImageData> images, bool vision) {
@@ -193,7 +307,9 @@ abstract final class ChatMlBridge {
 /// back as a `<tool_call>` body, so the segmenter and the tool-call parser read a cloud reply
 /// exactly like a local one.
 class CloudEventAdapter {
-  bool _thinking = false;
+  CloudEventAdapter({bool startInThinking = false}) : _thinking = startInThinking;
+
+  bool _thinking;
   bool _finished = false;
 
   /// True once the provider said why it stopped.
