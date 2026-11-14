@@ -1828,6 +1828,7 @@ class _StyleOptions extends StatelessWidget {
   final ValueChanged<ThinkingStyle> onPick;
 
   static const _names = {
+    ThinkingStyle.brand: 'ロゴ',
     ThinkingStyle.basic: '基本',
     ThinkingStyle.ring: 'リング',
     ThinkingStyle.pulse: 'パルス',

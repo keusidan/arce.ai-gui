@@ -7,7 +7,7 @@ import 'svg_icons.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// The icon shown while the model works. Five styles, from a quiet static one to a spinner.
+/// The icon shown while the model works. Six styles, from the animated brand logo to a spinner.
 class ThinkingIcon extends StatefulWidget {
   const ThinkingIcon({super.key, required this.style, this.size = 35, this.animate = true});
 
@@ -57,6 +57,15 @@ class _ThinkingIconState extends State<ThinkingIcon> with SingleTickerProviderSt
         builder: (context, _) {
           final t = _controller.value;
           switch (widget.style) {
+            case ThinkingStyle.brand:
+              final frame = widget.animate ? (t * 24).floor().clamp(0, 23) : 12;
+              return Image.asset(
+                'assets/icon/thinking/frame_${frame.toString().padLeft(2, '0')}.png',
+                width: size,
+                height: size,
+                fit: BoxFit.contain,
+                errorBuilder: (_, _, _) => ArceIcon(ArceSvg.brand, size: size * .72, color: c.accent),
+              );
             case ThinkingStyle.basic:
               // the dots to the right of the brain, level with its lower half
               return Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [

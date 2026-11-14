@@ -21,7 +21,7 @@ import 'kv_snapshots.dart';
 enum GpuOffload { auto, cpuOnly, gpuPriority, maxGpu }
 
 /// Icon shown while the model is working (see the "思考中" designs).
-enum ThinkingStyle { basic, ring, pulse, dots, rotation }
+enum ThinkingStyle { brand, basic, ring, pulse, dots, rotation }
 
 /// Every user setting (spec §8, §26). Basic ones first, developer ones after.
 class AppSettings {
@@ -34,7 +34,7 @@ class AppSettings {
     this.speedAccuracy = 0.5,
     this.hyperLoad = false,
     this.theme = ThemeMode.system,
-    this.thinkingStyle = ThinkingStyle.pulse,
+    this.thinkingStyle = ThinkingStyle.brand,
     this.agentOverride = '',
     this.aiAgentSelection = true,
     this.lastModelPath = '',

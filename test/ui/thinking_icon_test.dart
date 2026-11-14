@@ -29,5 +29,7 @@ void main() {
     expect(tester.getSize(find.byType(ThinkingIcon)).width, greaterThan(25));
     await show(tester, ThinkingStyle.pulse);
     expect(tester.getSize(find.byType(ThinkingIcon)).width, 25);
+    await show(tester, ThinkingStyle.brand);
+    expect(tester.getSize(find.byType(ThinkingIcon)).width, 25);
   });
 }

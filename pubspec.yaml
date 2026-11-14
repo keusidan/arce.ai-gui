@@ -38,6 +38,9 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
+  assets:
+    - assets/icon/thinking/
+
   # Noto Sans JP from Google Fonts (SIL OFL 1.1, assets/fonts/OFL.txt). Bundled so Japanese text
   # uses Japanese glyphs on every platform; without it Linux and Android pick the Chinese variant
   # of a system CJK font for characters shared between the languages (直, 骨, 角 ...).
